@@ -37,6 +37,7 @@ from config import (
     MIN_API_DELAY,
     NOTIFY_N8N_ENABLED,
     N8N_WEBHOOK_URL,
+    VINTED_PROXY,
 )
 
 # ── Mobile app profiles (from real iOS Vinted app traffic) ────────────────────
@@ -78,6 +79,8 @@ class VintedScraper:
         self._profile = random.choice(MOBILE_PROFILES)
         # Optional callback: on_blocked(wait_minutes: int) — called when a 403 block is detected
         self._on_blocked = on_blocked
+        # Proxy toggle: alternates between proxy and no-proxy on each 403
+        self._use_proxy = False
         self._apply_headers()
         self._init_session()
 
@@ -110,12 +113,26 @@ class VintedScraper:
         """Return True if currently in a 403 cooldown period."""
         return time.time() < self._blocked_until
 
+    def _toggle_proxy(self):
+        """Toggle proxy on/off on each 403. No-op if VINTED_PROXY is not configured."""
+        if not VINTED_PROXY:
+            return
+        self._use_proxy = not self._use_proxy
+        if self._use_proxy:
+            proxy_url = f"http://{VINTED_PROXY}"
+            self.session.proxies = {"http": proxy_url, "https": proxy_url}
+            print(f"🔀 Switching to proxy: {VINTED_PROXY}")
+        else:
+            self.session.proxies = {}
+            print("🔀 Switching to direct connection (no proxy)")
+
     def _set_blocked(self):
-        """Activate block cooldown, log how long we'll wait, and fire the callback."""
+        """Activate block cooldown, toggle proxy, and fire the callback."""
         self._blocked_until = time.time() + BLOCK_WAIT_SECONDS
         wait_min = BLOCK_WAIT_SECONDS // 60
         print(f"🚫 Blocked by Vinted (403)! Pausing all requests for {wait_min} minutes "
               f"(until {datetime.fromtimestamp(self._blocked_until).strftime('%H:%M:%S')})...")
+        self._toggle_proxy()
         if self._on_blocked:
             try:
                 self._on_blocked(wait_min)

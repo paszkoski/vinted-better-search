@@ -20,6 +20,7 @@ POLL_INTERVAL = 300  # seconds (5 minutes)
 SESSION_REFRESH_INTERVAL = 50   # refresh session every N API calls
 BLOCK_WAIT_SECONDS = int(os.environ.get("BLOCK_WAIT_SECONDS", 1800))  # 30 min default
 MIN_API_DELAY = float(os.environ.get("MIN_API_DELAY", 1.5))           # seconds between requests
+VINTED_PROXY = os.environ.get("VINTED_PROXY", "")                     # proxy in host:port format (optional)
 
 # ── Notifications ──────────────────────────────────────────────────────────────
 

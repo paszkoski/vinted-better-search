@@ -22,6 +22,7 @@ PUSHOVER_TOKEN = os.environ.get("PUSHOVER_TOKEN", "")
 PUSHOVER_USER = os.environ.get("PUSHOVER_USER", "")
 N8N_WEBHOOK_URL = os.environ.get("N8N_WEBHOOK_URL", "")
 API_KEY = os.environ.get("API_KEY", "")
+VINTED_PROXY = os.environ.get("VINTED_PROXY", "")
 PORT = int(os.environ.get("PORT", 5000))
 DATA_DIR = os.environ.get(
     "DATA_DIR",
@@ -603,6 +604,8 @@ def index():
         pushover_token_set=bool(PUSHOVER_TOKEN),
         pushover_user_set=bool(PUSHOVER_USER),
         n8n_webhook_set=bool(n8n_webhook_url),
+        proxy_configured=bool(VINTED_PROXY),
+        proxy_value=VINTED_PROXY,
         settings=settings,
     )
 
@@ -852,6 +855,23 @@ def test_n8n():
     }
     ok = send_n8n_webhook([test_item], "Test Query", "test query", webhook_url)
     return jsonify({"ok": ok, "error": None if ok else "Check container logs for details."})
+
+
+@app.route("/api/test-proxy", methods=["POST"])
+def test_proxy():
+    if not VINTED_PROXY:
+        return jsonify({"ok": False, "error": "VINTED_PROXY env var is not set."})
+    proxy_url = f"http://{VINTED_PROXY}"
+    proxies = {"http": proxy_url, "https": proxy_url}
+    from config import VINTED_BASE_URL
+    try:
+        resp = requests.get(VINTED_BASE_URL, proxies=proxies, timeout=10,
+                            headers={"User-Agent": "Mozilla/5.0"})
+        if resp.status_code < 500:
+            return jsonify({"ok": True, "status_code": resp.status_code})
+        return jsonify({"ok": False, "error": f"Server returned {resp.status_code}."})
+    except requests.RequestException as e:
+        return jsonify({"ok": False, "error": str(e)})
 
 
 @app.route("/health")

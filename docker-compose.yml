@@ -18,6 +18,7 @@ services:
       - PORT                   # web port inside container (optional, default 5000)
       - BLOCK_WAIT_SECONDS     # seconds to pause after a 403 block (optional, default 1800 = 30 min)
       - MIN_API_DELAY          # minimum seconds between API requests (optional, default 1.5)
+      - VINTED_PROXY           # proxy in host:port format, e.g. 1.2.3.4:8080 (optional)
     restart: unless-stopped
     healthcheck:
       test:
