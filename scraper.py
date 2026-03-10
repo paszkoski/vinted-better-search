@@ -47,20 +47,32 @@ _BUILD = "30214"
 
 MOBILE_PROFILES = [
     {
-        "User-Agent": f"vinted-ios Vinted/{_APP_VERSION} (lt.manodrabuziai.pl; build:{_BUILD}; iOS 17.2.1) iPhone16,1",
+        "User-Agent": f"vinted-ios Vinted/{_APP_VERSION} (lt.manodrabuziai.pl; build:{_BUILD}; iOS 26.2.1) iPhone16,1",
         "X-Device-Model": "iPhone16,1",
+        "x-os-version": "26.2.1",
+        "x-screen-width": "1179.0",
+        "x-screen-height": "2556.0",
     },
     {
-        "User-Agent": f"vinted-ios Vinted/{_APP_VERSION} (lt.manodrabuziai.pl; build:{_BUILD}; iOS 17.1.2) iPhone15,2",
-        "X-Device-Model": "iPhone15,2",
+        "User-Agent": f"vinted-ios Vinted/{_APP_VERSION} (lt.manodrabuziai.pl; build:{_BUILD}; iOS 26.2.1) iPhone17,2",
+        "X-Device-Model": "iPhone17,2",
+        "x-os-version": "26.2.1",
+        "x-screen-width": "1290.0",
+        "x-screen-height": "2796.0",
     },
     {
-        "User-Agent": f"vinted-ios Vinted/{_APP_VERSION} (lt.manodrabuziai.pl; build:{_BUILD}; iOS 16.7.4) iPhone14,2",
-        "X-Device-Model": "iPhone14,2",
+        "User-Agent": f"vinted-ios Vinted/{_APP_VERSION} (lt.manodrabuziai.pl; build:{_BUILD}; iOS 26.1.1) iPhone15,4",
+        "X-Device-Model": "iPhone15,4",
+        "x-os-version": "26.1.1",
+        "x-screen-width": "1179.0",
+        "x-screen-height": "2556.0",
     },
     {
-        "User-Agent": f"vinted-ios Vinted/{_APP_VERSION} (lt.manodrabuziai.pl; build:{_BUILD}; iOS 18.1.0) iPhone17,1",
-        "X-Device-Model": "iPhone17,1",
+        "User-Agent": f"vinted-ios Vinted/{_APP_VERSION} (lt.manodrabuziai.pl; build:{_BUILD}; iOS 26.0.1) iPhone16,2",
+        "X-Device-Model": "iPhone16,2",
+        "x-os-version": "26.0.1",
+        "x-screen-width": "1290.0",
+        "x-screen-height": "2796.0",
     },
 ]
 
@@ -76,7 +88,11 @@ class VintedScraper:
         # Stable per-instance identifiers (simulate a real device)
         self._device_uuid = secrets.token_hex(16)
         self._anon_id = str(uuid.uuid4())
+        self._icloud_id = "_" + secrets.token_hex(16)   # format: _<32 hex chars>
         self._profile = random.choice(MOBILE_PROFILES)
+        # Per-session identifiers (rotate on session refresh)
+        self._session_id = str(uuid.uuid4())
+        self._agent_id = str(uuid.uuid4())
         # Optional callback: on_blocked(wait_minutes: int) — called when a 403 block is detected
         self._on_blocked = on_blocked
         # Proxy toggle: alternates between proxy and no-proxy on each 403
@@ -87,25 +103,54 @@ class VintedScraper:
     # ── Header / profile management ───────────────────────────────────────────
 
     def _rotate_profile(self):
-        """Pick a new random mobile profile on each session refresh."""
+        """Pick a new random mobile profile and rotate per-session identifiers."""
         self._profile = random.choice(MOBILE_PROFILES)
+        self._session_id = str(uuid.uuid4())
+        self._agent_id = str(uuid.uuid4())
 
     def _apply_headers(self):
-        """Apply current mobile-app headers to the session."""
+        """Apply current mobile-app headers to the session.
+
+        Header order matches the real iOS app GET request fingerprint observed in HAR:
+        X-Session-Id, Accept, Locale, Accept-Language, Accept-Encoding,
+        X-Anon-Id, X-Device-UUID, User-Agent, Connection, Short-Bundle-Version,
+        X-ICloud-Identifier, X-Device-Model, X-App-Version, then extra device headers.
+        """
+        p = self._profile
         self.session.headers.clear()
         self.session.headers.update({
-            **self._profile,
+            "X-Session-Id": self._session_id,
             "Accept": "*/*",
-            "Accept-Encoding": "gzip, deflate",
-            "Accept-Language": "pl-PL",
-            "Connection": "keep-alive",
             "Locale": "pl-PL",
-            "Short-Bundle-Version": _APP_VERSION,
-            "X-App-Version": _APP_VERSION,
+            "Accept-Language": "pl-PL",
+            "Accept-Encoding": "gzip, deflate, br",
             "X-Anon-Id": self._anon_id,
             "X-Device-UUID": self._device_uuid,
-            "X-Session-Id": str(uuid.uuid4()),  # fresh per session
+            "User-Agent": p["User-Agent"],
+            "Connection": "keep-alive",
+            "Short-Bundle-Version": _APP_VERSION,
+            "X-ICloud-Identifier": self._icloud_id,
+            "X-Device-Model": p["X-Device-Model"],
+            "X-App-Version": _APP_VERSION,
+            "App-Version": "8",
+            "x-platform": "iphone",
+            "x-os-version": p["x-os-version"],
+            "x-portal": "pl",
+            "x-agent-id": self._agent_id,
+            "x-screen-width": p["x-screen-width"],
+            "x-screen-height": p["x-screen-height"],
         })
+
+    def _update_vudt_header(self):
+        """Sync X-V-Udt header from the v_udt session cookie.
+
+        Vinted's iOS app sends the v_udt cookie value as the X-V-Udt request header.
+        This token is used for device integrity verification — omitting it or sending
+        a stale/mismatched value triggers bot detection.
+        """
+        v_udt = self.session.cookies.get("v_udt")
+        if v_udt:
+            self.session.headers["X-V-Udt"] = v_udt
 
     # ── Block detection / cooldown ────────────────────────────────────────────
 
@@ -173,6 +218,7 @@ class VintedScraper:
 
             resp.raise_for_status()
             self._api_call_count = 0
+            self._update_vudt_header()
             print(f"✅ Session initialized (got {len(self.session.cookies)} cookies)")
         except requests.RequestException as e:
             print(f"⚠️  Session init warning: {e}")
@@ -195,7 +241,8 @@ class VintedScraper:
                order: str = DEFAULT_ORDER, price_from: float = None,
                price_to: float = None, brand_ids: list = None,
                size_ids: list = None, color_ids: list = None,
-               material_ids: list = None, status_ids: list = None) -> dict:
+               material_ids: list = None, status_ids: list = None,
+               search_session_id: str = None) -> dict:
         """
         Search Vinted catalog for items.
 
@@ -222,12 +269,17 @@ class VintedScraper:
 
         url = f"{VINTED_API_URL}/catalog/items"
         # Use list of tuples to support repeated keys (e.g. brand_ids[]=1&brand_ids[]=2)
+        if search_session_id is None:
+            search_session_id = str(uuid.uuid4())
         params = [
             ("search_text", query),
             ("currency", DEFAULT_CURRENCY),
             ("order", order),
             ("page", page),
             ("per_page", DEFAULT_PER_PAGE),
+            ("search_session_id", search_session_id),
+            ("screen_name", "catalog"),
+            ("column_count", 2),
         ]
 
         if catalog_id is not None:
@@ -401,11 +453,12 @@ class VintedScraper:
         new_items = []
         page = 1
         newest_id_this_run = None
+        search_session_id = str(uuid.uuid4())  # stable across pages of the same search
 
         while True:
             data = self.search(query, page=page, catalog_id=catalog_id,
                                order="newest_first", price_from=price_from,
-                               price_to=price_to)
+                               price_to=price_to, search_session_id=search_session_id)
             items = data.get("items", [])
             pagination = data.get("pagination", {})
             total_pages = pagination.get("total_pages", 1)
