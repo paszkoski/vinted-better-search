@@ -1,0 +1,966 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Vinted Monitor</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+  <style>
+    body { background: #f5f6fa; }
+    .navbar-brand { font-weight: 700; letter-spacing: -0.5px; }
+    .card { border: none; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+    .card-header { background: #fff; border-bottom: 1px solid #eee; }
+    .table > :not(caption) > * > * { padding: .65rem .9rem; }
+    .badge-status { font-size: .75rem; }
+    .finding-img { width: 100%; height: 160px; object-fit: cover; background: #eee; }
+    .finding-card { transition: transform .15s; }
+    .finding-card:hover { transform: translateY(-2px); }
+    .status-checking { animation: blink 1s step-start infinite; }
+    @keyframes blink { 50% { opacity: .4; } }
+    .action-btn { padding: .25rem .45rem; }
+    .empty-state { padding: 3rem 1rem; color: #adb5bd; }
+    .empty-state i { font-size: 3rem; display: block; margin-bottom: .75rem; }
+    .var-chip {
+      display: inline-block; background: #e9ecef; border-radius: 4px;
+      padding: 1px 7px; font-family: monospace; font-size: .8rem;
+      cursor: pointer; user-select: none;
+    }
+    .var-chip:hover { background: #d3d8de; }
+    #toast-container { position: fixed; bottom: 1.5rem; right: 1.5rem; z-index: 1100; }
+    .query-row { cursor: pointer; }
+    .query-row:hover td { background: #f0f4ff !important; }
+    .findings-chevron { transition: transform .25s ease; color: #adb5bd; font-size: .75rem; flex-shrink: 0; }
+    .findings-panel { overflow: hidden; transition: max-height .35s ease; max-height: 0; }
+    .findings-collapse-row td { padding: 0 !important; border-top: none !important; }
+    /* Hide the Bootstrap dropdown caret on icon-only buttons */
+    .no-caret.dropdown-toggle::after { display: none; }
+  </style>
+</head>
+<body>
+
+<!-- Navbar -->
+<nav class="navbar navbar-expand-lg navbar-dark bg-dark py-2">
+  <div class="container-fluid px-4">
+    <a class="navbar-brand" href="/">
+      <i class="bi bi-eye-fill me-2 text-primary"></i>Vinted Monitor
+    </a>
+    <div class="ms-auto d-flex align-items-center gap-2">
+      {% if pushover_configured and settings.notify_pushover_enabled %}
+        <span class="badge bg-success"><i class="bi bi-bell-fill me-1"></i>Pushover</span>
+      {% elif pushover_configured %}
+        <span class="badge bg-secondary" title="Pushover configured but disabled">
+          <i class="bi bi-bell-slash me-1"></i>Pushover off
+        </span>
+      {% else %}
+        <span class="badge bg-secondary" title="Set PUSHOVER_TOKEN and PUSHOVER_USER env vars">
+          <i class="bi bi-bell-slash me-1"></i>Pushover
+        </span>
+      {% endif %}
+      {% if settings.notify_n8n_enabled and n8n_webhook_set %}
+        <span class="badge bg-success"><i class="bi bi-webhook me-1"></i>n8n</span>
+      {% elif settings.notify_n8n_enabled %}
+        <span class="badge bg-warning text-dark" title="n8n enabled but webhook URL not set">
+          <i class="bi bi-webhook me-1"></i>n8n (no URL)
+        </span>
+      {% else %}
+        <span class="badge bg-secondary" title="Enable n8n in settings"><i class="bi bi-webhook me-1"></i>n8n off</span>
+      {% endif %}
+      <button class="btn btn-outline-secondary btn-sm" data-bs-toggle="modal" data-bs-target="#settingsModal"
+              title="Notification settings">
+        <i class="bi bi-gear"></i>
+      </button>
+    </div>
+  </div>
+</nav>
+
+<div class="container-fluid px-4 py-4">
+
+  <!-- Queries card -->
+  <div class="card">
+    <div class="card-header d-flex align-items-center justify-content-between py-3">
+      <h6 class="mb-0 fw-semibold"><i class="bi bi-search me-2 text-primary"></i>Monitored Queries</h6>
+      <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#addModal">
+        <i class="bi bi-plus-lg me-1"></i>Add Query
+      </button>
+    </div>
+    <div class="card-body p-0">
+      {% if queries %}
+      <div class="table-responsive">
+        <table class="table table-hover align-middle mb-0">
+          <thead class="table-light">
+            <tr>
+              <th>Query</th>
+              <th class="d-none d-md-table-cell">Filters</th>
+              <th class="d-none d-md-table-cell">Interval</th>
+              <th class="d-none d-md-table-cell">Status</th>
+              <th class="d-none d-md-table-cell">Last Checked</th>
+              <th class="text-end">Findings</th>
+              <th class="text-end">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for q in queries %}
+            <tr class="query-row" data-qid="{{ q.id }}" onclick="toggleFindings({{ q.id }}, event)">
+
+              <!-- Query name + mobile-only inline status -->
+              <td>
+                <div class="d-flex align-items-center gap-2">
+                  <i class="bi bi-chevron-right findings-chevron" id="chevron-{{ q.id }}"></i>
+                  <div class="flex-grow-1" style="min-width:0">
+                    <div class="d-flex align-items-center gap-2 flex-wrap">
+                      <span class="fw-semibold">{{ q.name or q.search_text or '(filters only)' }}</span>
+                      <!-- Status badge shown inline on mobile only -->
+                      <span class="status-inline-mobile d-md-none">
+                        {% if not q.enabled %}
+                          <span class="badge bg-secondary badge-status">Paused</span>
+                        {% elif q.status == 'checking' %}
+                          <span class="badge bg-info badge-status status-checking">Checking…</span>
+                        {% elif q.status == 'error' %}
+                          <span class="badge bg-danger badge-status">Error</span>
+                        {% elif q.status == 'ok' %}
+                          <span class="badge bg-success badge-status">OK</span>
+                        {% else %}
+                          <span class="badge bg-warning text-dark badge-status">Pending</span>
+                        {% endif %}
+                      </span>
+                    </div>
+                    {% if q.name and q.search_text %}
+                      <div class="text-muted" style="font-size:.8rem">{{ q.search_text }}</div>
+                    {% endif %}
+                  </div>
+                </div>
+              </td>
+
+              <!-- Filters (desktop only) -->
+              <td class="d-none d-md-table-cell">
+                {% if q.catalog_id %}
+                  <span class="badge bg-secondary me-1">Cat: {{ q.catalog_id }}</span>
+                {% endif %}
+                {% if q.price_from or q.price_to %}
+                  <span class="badge bg-secondary me-1">
+                    {{ q.price_from | int if q.price_from else '∞' }} –
+                    {{ q.price_to | int if q.price_to else '∞' }}
+                  </span>
+                {% endif %}
+                {% if q.brand_ids %}
+                  <span class="badge bg-secondary me-1">Brands: {{ q.brand_ids }}</span>
+                {% endif %}
+                {% if q.size_ids %}
+                  <span class="badge bg-secondary me-1">Sizes: {{ q.size_ids }}</span>
+                {% endif %}
+                {% if q.color_ids %}
+                  <span class="badge bg-secondary me-1">Colors: {{ q.color_ids }}</span>
+                {% endif %}
+                {% if q.material_ids %}
+                  <span class="badge bg-secondary me-1">Materials: {{ q.material_ids }}</span>
+                {% endif %}
+                {% if q.status_ids %}
+                  <span class="badge bg-secondary me-1">Conditions: {{ q.status_ids }}</span>
+                {% endif %}
+                {% if not q.catalog_id and not q.price_from and not q.price_to
+                      and not q.brand_ids and not q.size_ids and not q.color_ids
+                      and not q.material_ids and not q.status_ids %}
+                  <span class="text-muted">—</span>
+                {% endif %}
+              </td>
+
+              <!-- Interval (desktop only) -->
+              <td class="d-none d-md-table-cell text-nowrap">
+                {% set mins = q.interval_seconds // 60 %}
+                {% if mins < 60 %}{{ mins }}m
+                {% elif mins % 60 == 0 %}{{ mins // 60 }}h
+                {% else %}{{ mins // 60 }}h {{ mins % 60 }}m{% endif %}
+              </td>
+
+              <!-- Status (desktop only — mobile version is inline in Query cell) -->
+              <td class="status-cell d-none d-md-table-cell">
+                {% if not q.enabled %}
+                  <span class="badge bg-secondary badge-status">Paused</span>
+                {% elif q.status == 'checking' %}
+                  <span class="badge bg-info badge-status status-checking">Checking…</span>
+                {% elif q.status == 'error' %}
+                  <span class="badge bg-danger badge-status">Error</span>
+                {% elif q.status == 'ok' %}
+                  <span class="badge bg-success badge-status">OK</span>
+                {% else %}
+                  <span class="badge bg-warning text-dark badge-status">Pending</span>
+                {% endif %}
+              </td>
+
+              <!-- Last Checked (desktop only) -->
+              <td class="last-checked d-none d-md-table-cell text-muted" style="font-size:.85rem"
+                  data-ts="{{ q.last_checked or '' }}">
+                {{ q.last_checked or 'Never' }}
+              </td>
+
+              <!-- Findings count -->
+              <td class="text-end findings-count">{{ q.findings_count }}</td>
+
+              <!-- Actions -->
+              <td class="text-end">
+
+                <!-- Desktop: all 4 buttons side by side -->
+                <div class="d-none d-md-flex justify-content-end gap-1">
+                  <form method="post" action="/queries/{{ q.id }}/check-now">
+                    <button class="btn btn-outline-primary action-btn" title="Check now">
+                      <i class="bi bi-arrow-repeat"></i>
+                    </button>
+                  </form>
+                  <button class="btn btn-outline-secondary action-btn"
+                          data-bs-toggle="modal" data-bs-target="#editModal"
+                          title="Edit"
+                          data-qid="{{ q.id }}"
+                          data-name="{{ q.name or '' }}"
+                          data-search="{{ q.search_text }}"
+                          data-catalog="{{ q.catalog_id or '' }}"
+                          data-price-from="{{ q.price_from or '' }}"
+                          data-price-to="{{ q.price_to or '' }}"
+                          data-brand-ids="{{ q.brand_ids or '' }}"
+                          data-size-ids="{{ q.size_ids or '' }}"
+                          data-color-ids="{{ q.color_ids or '' }}"
+                          data-material-ids="{{ q.material_ids or '' }}"
+                          data-status-ids="{{ q.status_ids or '' }}"
+                          data-interval="{{ q.interval_seconds }}">
+                    <i class="bi bi-pencil"></i>
+                  </button>
+                  <form method="post" action="/queries/{{ q.id }}/toggle">
+                    <button class="btn btn-outline-{{ 'warning' if q.enabled else 'success' }} action-btn"
+                            title="{{ 'Pause' if q.enabled else 'Resume' }}">
+                      <i class="bi bi-{{ 'pause-fill' if q.enabled else 'play-fill' }}"></i>
+                    </button>
+                  </form>
+                  <form method="post" action="/queries/{{ q.id }}/delete"
+                        onsubmit="return confirm('Delete this query and all its findings?')">
+                    <button class="btn btn-outline-danger action-btn" title="Delete">
+                      <i class="bi bi-trash"></i>
+                    </button>
+                  </form>
+                </div>
+
+                <!-- Mobile: check-now + ⋮ dropdown -->
+                <div class="d-flex d-md-none justify-content-end gap-1">
+                  <form method="post" action="/queries/{{ q.id }}/check-now">
+                    <button class="btn btn-outline-primary action-btn" title="Check now">
+                      <i class="bi bi-arrow-repeat"></i>
+                    </button>
+                  </form>
+                  <div class="dropdown">
+                    <button class="btn btn-outline-secondary action-btn dropdown-toggle no-caret"
+                            type="button" data-bs-toggle="dropdown" aria-expanded="false">
+                      <i class="bi bi-three-dots-vertical"></i>
+                    </button>
+                    <ul class="dropdown-menu dropdown-menu-end">
+                      <li>
+                        <button class="dropdown-item"
+                                data-bs-toggle="modal" data-bs-target="#editModal"
+                                data-qid="{{ q.id }}"
+                                data-name="{{ q.name or '' }}"
+                                data-search="{{ q.search_text }}"
+                                data-catalog="{{ q.catalog_id or '' }}"
+                                data-price-from="{{ q.price_from or '' }}"
+                                data-price-to="{{ q.price_to or '' }}"
+                                data-brand-ids="{{ q.brand_ids or '' }}"
+                                data-size-ids="{{ q.size_ids or '' }}"
+                                data-color-ids="{{ q.color_ids or '' }}"
+                                data-material-ids="{{ q.material_ids or '' }}"
+                                data-status-ids="{{ q.status_ids or '' }}"
+                                data-interval="{{ q.interval_seconds }}">
+                          <i class="bi bi-pencil me-2"></i>Edit
+                        </button>
+                      </li>
+                      <li>
+                        <form method="post" action="/queries/{{ q.id }}/toggle">
+                          <button type="submit"
+                                  class="dropdown-item text-{{ 'warning' if q.enabled else 'success' }}">
+                            <i class="bi bi-{{ 'pause-fill' if q.enabled else 'play-fill' }} me-2"></i>
+                            {{ 'Pause' if q.enabled else 'Resume' }}
+                          </button>
+                        </form>
+                      </li>
+                      <li><hr class="dropdown-divider"></li>
+                      <li>
+                        <form method="post" action="/queries/{{ q.id }}/delete"
+                              onsubmit="return confirm('Delete this query and all its findings?')">
+                          <button type="submit" class="dropdown-item text-danger">
+                            <i class="bi bi-trash me-2"></i>Delete
+                          </button>
+                        </form>
+                      </li>
+                    </ul>
+                  </div>
+                </div>
+
+              </td>
+            </tr>
+
+            <!-- Expandable findings row -->
+            <tr class="findings-collapse-row" id="findings-row-{{ q.id }}" style="display:none">
+              <td colspan="7">
+                <div class="findings-panel" id="findings-panel-{{ q.id }}">
+                  <div id="findings-content-{{ q.id }}" class="px-3 py-3 bg-light"></div>
+                </div>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <div class="empty-state text-center">
+        <i class="bi bi-search"></i>
+        <p class="mb-0">No queries yet. Click <strong>Add Query</strong> to start monitoring.</p>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+
+</div>
+
+<!-- Add Query Modal -->
+<div class="modal fade" id="addModal" tabindex="-1" aria-labelledby="addModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="addModalLabel">Add Monitoring Query</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <form method="post" action="/queries">
+        <div class="modal-body">
+          <!-- URL import -->
+          <div class="mb-3 p-3 bg-light rounded">
+            <label class="form-label fw-semibold mb-1">
+              <i class="bi bi-link-45deg me-1"></i>Import from Vinted URL
+              <span class="text-muted fw-normal">(optional)</span>
+            </label>
+            <div class="input-group">
+              <input type="text" id="add_url" class="form-control"
+                     placeholder="https://www.vinted.pl/catalog?search_text=...">
+              <button type="button" class="btn btn-outline-secondary"
+                      onclick="applyVintedUrl('add_url', 'add_')">
+                <i class="bi bi-magic me-1"></i>Parse
+              </button>
+            </div>
+            <div class="form-text">Paste a Vinted search URL to auto-fill all filters below.</div>
+          </div>
+
+          <div class="mb-3">
+            <label class="form-label">Label <span class="text-muted">(optional)</span></label>
+            <input type="text" name="name" id="add_name" class="form-control" placeholder="e.g. iPhone cheap">
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-semibold">Search Text <span class="text-muted fw-normal">(optional if filters are set)</span></label>
+            <input type="text" name="search_text" id="add_search_text" class="form-control"
+                   placeholder="e.g. iPhone 15 Pro">
+          </div>
+
+          <div class="row g-2 mb-2">
+            <div class="col-4">
+              <label class="form-label">Catalog ID</label>
+              <input type="number" name="catalog_id" id="add_catalog_id" class="form-control" placeholder="e.g. 2994">
+              <div class="form-text">Category filter</div>
+            </div>
+            <div class="col-4">
+              <label class="form-label">Price From</label>
+              <input type="number" step="0.01" min="0" name="price_from" id="add_price_from" class="form-control" placeholder="0">
+            </div>
+            <div class="col-4">
+              <label class="form-label">Price To</label>
+              <input type="number" step="0.01" min="0" name="price_to" id="add_price_to" class="form-control" placeholder="any">
+            </div>
+          </div>
+          <div class="row g-2 mb-2">
+            <div class="col-6">
+              <label class="form-label">Brand IDs</label>
+              <input type="text" name="brand_ids" id="add_brand_ids" class="form-control" placeholder="e.g. 3203,53">
+              <div class="form-text">Comma-separated brand IDs</div>
+            </div>
+            <div class="col-6">
+              <label class="form-label">Size IDs</label>
+              <input type="text" name="size_ids" id="add_size_ids" class="form-control" placeholder="e.g. 784,785">
+              <div class="form-text">Comma-separated size IDs</div>
+            </div>
+          </div>
+          <div class="row g-2 mb-3">
+            <div class="col-4">
+              <label class="form-label">Color IDs</label>
+              <input type="text" name="color_ids" id="add_color_ids" class="form-control" placeholder="e.g. 1,3,9">
+              <div class="form-text">Comma-separated</div>
+            </div>
+            <div class="col-4">
+              <label class="form-label">Material IDs</label>
+              <input type="text" name="material_ids" id="add_material_ids" class="form-control" placeholder="e.g. 302,301">
+              <div class="form-text">Comma-separated</div>
+            </div>
+            <div class="col-4">
+              <label class="form-label">Condition IDs</label>
+              <input type="text" name="status_ids" id="add_status_ids" class="form-control" placeholder="e.g. 6,1">
+              <div class="form-text">Comma-separated</div>
+            </div>
+          </div>
+
+          <div class="mb-1">
+            <label class="form-label">Poll Interval</label>
+            <select name="interval_seconds" class="form-select">
+              <option value="60">1 minute</option>
+              <option value="120">2 minutes</option>
+              <option value="300" selected>5 minutes</option>
+              <option value="600">10 minutes</option>
+              <option value="900">15 minutes</option>
+              <option value="1800">30 minutes</option>
+              <option value="3600">1 hour</option>
+            </select>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-primary">Add Query</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<!-- Edit Query Modal -->
+<div class="modal fade" id="editModal" tabindex="-1" aria-labelledby="editModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="editModalLabel">Edit Query</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <form id="editForm" method="post">
+        <div class="modal-body">
+          <!-- URL import -->
+          <div class="mb-3 p-3 bg-light rounded">
+            <label class="form-label fw-semibold mb-1">
+              <i class="bi bi-link-45deg me-1"></i>Import from Vinted URL
+              <span class="text-muted fw-normal">(optional)</span>
+            </label>
+            <div class="input-group">
+              <input type="text" id="edit_url" class="form-control"
+                     placeholder="https://www.vinted.pl/catalog?search_text=...">
+              <button type="button" class="btn btn-outline-secondary"
+                      onclick="applyVintedUrl('edit_url', 'edit_')">
+                <i class="bi bi-magic me-1"></i>Parse
+              </button>
+            </div>
+            <div class="form-text">Paste a Vinted search URL to overwrite all filters below.</div>
+          </div>
+
+          <div class="mb-3">
+            <label class="form-label">Label <span class="text-muted">(optional)</span></label>
+            <input type="text" id="edit_name" name="name" class="form-control">
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-semibold">Search Text <span class="text-muted fw-normal">(optional if filters are set)</span></label>
+            <input type="text" id="edit_search_text" name="search_text" class="form-control">
+            <div class="form-text text-warning">
+              <i class="bi bi-info-circle me-1"></i>Changing search text or filters resets the baseline — the next check establishes a new starting point.
+            </div>
+          </div>
+
+          <div class="row g-2 mb-2">
+            <div class="col-4">
+              <label class="form-label">Catalog ID</label>
+              <input type="number" id="edit_catalog_id" name="catalog_id" class="form-control" placeholder="e.g. 2994">
+            </div>
+            <div class="col-4">
+              <label class="form-label">Price From</label>
+              <input type="number" step="0.01" min="0" id="edit_price_from" name="price_from" class="form-control" placeholder="0">
+            </div>
+            <div class="col-4">
+              <label class="form-label">Price To</label>
+              <input type="number" step="0.01" min="0" id="edit_price_to" name="price_to" class="form-control" placeholder="any">
+            </div>
+          </div>
+          <div class="row g-2 mb-2">
+            <div class="col-6">
+              <label class="form-label">Brand IDs</label>
+              <input type="text" name="brand_ids" id="edit_brand_ids" class="form-control" placeholder="e.g. 3203,53">
+              <div class="form-text">Comma-separated brand IDs</div>
+            </div>
+            <div class="col-6">
+              <label class="form-label">Size IDs</label>
+              <input type="text" name="size_ids" id="edit_size_ids" class="form-control" placeholder="e.g. 784,785">
+              <div class="form-text">Comma-separated size IDs</div>
+            </div>
+          </div>
+          <div class="row g-2 mb-3">
+            <div class="col-4">
+              <label class="form-label">Color IDs</label>
+              <input type="text" name="color_ids" id="edit_color_ids" class="form-control" placeholder="e.g. 1,3,9">
+              <div class="form-text">Comma-separated</div>
+            </div>
+            <div class="col-4">
+              <label class="form-label">Material IDs</label>
+              <input type="text" name="material_ids" id="edit_material_ids" class="form-control" placeholder="e.g. 302,301">
+              <div class="form-text">Comma-separated</div>
+            </div>
+            <div class="col-4">
+              <label class="form-label">Condition IDs</label>
+              <input type="text" name="status_ids" id="edit_status_ids" class="form-control" placeholder="e.g. 6,1">
+              <div class="form-text">Comma-separated</div>
+            </div>
+          </div>
+
+          <div class="mb-1">
+            <label class="form-label">Poll Interval</label>
+            <select id="edit_interval" name="interval_seconds" class="form-select">
+              <option value="60">1 minute</option>
+              <option value="120">2 minutes</option>
+              <option value="300">5 minutes</option>
+              <option value="600">10 minutes</option>
+              <option value="900">15 minutes</option>
+              <option value="1800">30 minutes</option>
+              <option value="3600">1 hour</option>
+            </select>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-primary">Save Changes</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<!-- Settings Modal -->
+<div class="modal fade" id="settingsModal" tabindex="-1" aria-labelledby="settingsModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="settingsModalLabel">
+          <i class="bi bi-gear me-2"></i>Notification Settings
+        </h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <form method="post" action="/settings">
+        <div class="modal-body">
+
+          <!-- ── Pushover ─────────────────────────────────────────────── -->
+          <div class="d-flex align-items-center justify-content-between mb-3">
+            <h6 class="fw-semibold mb-0"><i class="bi bi-bell me-2"></i>Pushover</h6>
+            <div class="form-check form-switch mb-0">
+              <input class="form-check-input" type="checkbox" role="switch"
+                     name="notify_pushover_enabled" id="notify_pushover_enabled"
+                     {% if settings.notify_pushover_enabled %}checked{% endif %}>
+              <label class="form-check-label" for="notify_pushover_enabled">Enabled</label>
+            </div>
+          </div>
+
+          <div class="mb-3">
+            <div class="d-flex gap-3 flex-wrap">
+              <div>
+                <span class="text-muted small">App Token (PUSHOVER_TOKEN)&ensp;</span>
+                {% if pushover_token_set %}
+                  <span class="badge bg-success"><i class="bi bi-check-lg me-1"></i>Set</span>
+                {% else %}
+                  <span class="badge bg-danger"><i class="bi bi-x-lg me-1"></i>Not set</span>
+                {% endif %}
+              </div>
+              <div>
+                <span class="text-muted small">User Key (PUSHOVER_USER)&ensp;</span>
+                {% if pushover_user_set %}
+                  <span class="badge bg-success"><i class="bi bi-check-lg me-1"></i>Set</span>
+                {% else %}
+                  <span class="badge bg-danger"><i class="bi bi-x-lg me-1"></i>Not set</span>
+                {% endif %}
+              </div>
+            </div>
+            <div class="form-text">Credentials are set via environment variables.</div>
+          </div>
+
+          <!-- Template variables reference -->
+          <div class="mb-3">
+            <p class="text-muted small mb-2">
+              Placeholders for the title and message templates:
+            </p>
+            <div class="d-flex gap-2 flex-wrap mb-3">
+              <span class="var-chip" onclick="insertVar(this)" title="The query name or search text">{query}</span>
+              <span class="var-chip" onclick="insertVar(this)" title="The item title">{title}</span>
+              <span class="var-chip" onclick="insertVar(this)" title="The item price e.g. 249 PLN">{price}</span>
+              <span class="var-chip" onclick="insertVar(this)" title="The Vinted item URL">{link}</span>
+            </div>
+          </div>
+
+          <div class="mb-3">
+            <label class="form-label fw-semibold" for="pushover_title">Notification Title</label>
+            <input type="text" id="pushover_title" name="pushover_title" class="form-control template-input"
+                   value="{{ settings.pushover_title }}"
+                   placeholder="New Vinted: {query}">
+            <div class="form-text">Preview: <span id="title-preview" class="fst-italic"></span></div>
+          </div>
+
+          <div class="mb-0">
+            <label class="form-label fw-semibold" for="pushover_message">Notification Message</label>
+            <input type="text" id="pushover_message" name="pushover_message" class="form-control template-input"
+                   value="{{ settings.pushover_message }}"
+                   placeholder="{title} — {price}">
+            <div class="form-text">Preview: <span id="message-preview" class="fst-italic"></span></div>
+          </div>
+
+          <hr class="my-4">
+
+          <!-- ── n8n Webhook ─────────────────────────────────────────── -->
+          <div class="d-flex align-items-center justify-content-between mb-3">
+            <h6 class="fw-semibold mb-0"><i class="bi bi-webhook me-2"></i>n8n Webhook</h6>
+            <div class="form-check form-switch mb-0">
+              <input class="form-check-input" type="checkbox" role="switch"
+                     name="notify_n8n_enabled" id="notify_n8n_enabled"
+                     {% if settings.notify_n8n_enabled %}checked{% endif %}>
+              <label class="form-check-label" for="notify_n8n_enabled">Enabled</label>
+            </div>
+          </div>
+
+          <div class="mb-0">
+            <label class="form-label" for="n8n_webhook_url">Webhook URL</label>
+            <input type="url" id="n8n_webhook_url" name="n8n_webhook_url" class="form-control"
+                   value="{{ settings.n8n_webhook_url }}"
+                   placeholder="https://your-n8n.com/webhook/abc123">
+            <div class="form-text">
+              Each new item is POSTed as JSON with all product data (title, price, image, brand, condition, seller, etc.).
+              The message template is configured on the n8n side.
+            </div>
+          </div>
+
+        </div>
+        <div class="modal-footer justify-content-between">
+          <div class="d-flex gap-2">
+            <button type="button" class="btn btn-outline-secondary" id="testPushoverBtn"
+                    {% if not pushover_configured %}disabled title="Configure Pushover credentials first"{% endif %}>
+              <i class="bi bi-send me-1"></i>Test Pushover
+            </button>
+            <button type="button" class="btn btn-outline-secondary" id="testN8nBtn">
+              <i class="bi bi-webhook me-1"></i>Test n8n
+            </button>
+          </div>
+          <div class="d-flex gap-2">
+            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+            <button type="submit" class="btn btn-primary">Save</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<!-- Toast container -->
+<div id="toast-container"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+  // ── Toast helper ──────────────────────────────────────────────────────────
+  function showToast(message, type = 'success') {
+    const id = 'toast-' + Date.now();
+    const bg = type === 'success' ? 'bg-success' : 'bg-danger';
+    const el = document.createElement('div');
+    el.innerHTML = `
+      <div id="${id}" class="toast align-items-center text-white ${bg} border-0 mb-2" role="alert">
+        <div class="d-flex">
+          <div class="toast-body">${message}</div>
+          <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
+        </div>
+      </div>`;
+    document.getElementById('toast-container').appendChild(el.firstElementChild);
+    const t = new bootstrap.Toast(document.getElementById(id), { delay: 4000 });
+    t.show();
+    document.getElementById(id).addEventListener('hidden.bs.toast', () => el.remove());
+  }
+
+  // ── Relative time ─────────────────────────────────────────────────────────
+  function relTime(iso) {
+    if (!iso) return 'Never';
+    const isoUtc = /[Z+]/.test(iso) ? iso : iso + 'Z';
+    const diff = Math.floor((Date.now() - new Date(isoUtc)) / 1000);
+    if (diff < 5)    return 'just now';
+    if (diff < 60)   return `${diff}s ago`;
+    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+    return new Date(isoUtc).toLocaleDateString();
+  }
+
+  function statusBadge(q) {
+    if (!q.enabled)              return '<span class="badge bg-secondary badge-status">Paused</span>';
+    if (q.status === 'checking') return '<span class="badge bg-info badge-status status-checking">Checking…</span>';
+    if (q.status === 'error')    return '<span class="badge bg-danger badge-status">Error</span>';
+    if (q.status === 'ok')       return '<span class="badge bg-success badge-status">OK</span>';
+    return '<span class="badge bg-warning text-dark badge-status">Pending</span>';
+  }
+
+  // ── Findings expand / collapse ────────────────────────────────────────────
+  function escHtml(s) {
+    return String(s || '')
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function renderFindings(findings) {
+    if (!findings.length) {
+      return '<p class="text-muted mb-0 text-center py-2">No findings yet for this query.</p>';
+    }
+    const cards = findings.map(f => `
+      <div class="col">
+        <div class="card h-100 finding-card shadow-sm">
+          ${f.image_url
+            ? `<img src="${escHtml(f.image_url)}" class="finding-img card-img-top"
+                    alt="${escHtml(f.title)}" loading="lazy"
+                    onerror="this.parentElement.querySelector('.img-placeholder').style.display='flex';this.remove()">`
+            : ''}
+          <div class="img-placeholder ${f.image_url ? 'd-none' : 'd-flex'} align-items-center justify-content-center bg-light finding-img">
+            <i class="bi bi-image text-muted" style="font-size:2rem"></i>
+          </div>
+          <div class="card-body p-2">
+            <div class="fw-semibold text-success mb-1" style="font-size:.85rem">${escHtml(f.price)}</div>
+            <div class="mb-1" style="font-size:.78rem;line-height:1.3;max-height:2.6em;overflow:hidden">${escHtml(f.title)}</div>
+            <div class="text-muted" style="font-size:.7rem">${relTime(f.found_at)}</div>
+          </div>
+          <div class="card-footer p-2 bg-transparent border-0">
+            <a href="${escHtml(f.url)}" target="_blank" rel="noopener"
+               class="btn btn-outline-primary btn-sm w-100" style="font-size:.75rem">
+              View on Vinted
+            </a>
+          </div>
+        </div>
+      </div>`).join('');
+    return `<div class="row row-cols-2 row-cols-sm-3 row-cols-md-4 row-cols-lg-5 row-cols-xl-6 g-3">${cards}</div>`;
+  }
+
+  const openPanels = new Set();
+
+  async function toggleFindings(qid, event) {
+    if (event.target.closest('form, button, a, [data-bs-toggle]')) return;
+
+    const collapseRow = document.getElementById('findings-row-' + qid);
+    const panel      = document.getElementById('findings-panel-' + qid);
+    const content    = document.getElementById('findings-content-' + qid);
+    const chevron    = document.getElementById('chevron-' + qid);
+
+    if (openPanels.has(qid)) {
+      panel.style.maxHeight = '0';
+      chevron.style.transform = '';
+      panel.addEventListener('transitionend', () => {
+        collapseRow.style.display = 'none';
+      }, { once: true });
+      openPanels.delete(qid);
+    } else {
+      collapseRow.style.display = '';
+      content.innerHTML = `
+        <div class="text-muted text-center py-3">
+          <span class="spinner-border spinner-border-sm me-2"></span>Loading findings…
+        </div>`;
+      requestAnimationFrame(() => {
+        panel.style.maxHeight = panel.scrollHeight + 'px';
+      });
+      chevron.style.transform = 'rotate(90deg)';
+      openPanels.add(qid);
+
+      try {
+        const res = await fetch(`/api/findings?query_id=${qid}&limit=48`);
+        const findings = await res.json();
+        content.innerHTML = renderFindings(findings);
+        panel.style.maxHeight = panel.scrollHeight + 'px';
+      } catch (_) {
+        content.innerHTML = '<p class="text-danger text-center mb-0 py-2">Failed to load findings.</p>';
+      }
+    }
+  }
+
+  // ── Template preview ──────────────────────────────────────────────────────
+  const SAMPLE = { query: 'iPhone 15', title: 'iPhone 15 Pro Max 256GB', price: '3 499 PLN', link: 'https://vinted.pl/…' };
+
+  function applyTpl(tpl) {
+    return tpl.replace(/\{(query|title|price|link)\}/g, (_, k) => SAMPLE[k] || `{${k}}`);
+  }
+
+  function updatePreviews() {
+    document.getElementById('title-preview').textContent =
+      applyTpl(document.getElementById('pushover_title').value || 'New Vinted: {query}');
+    document.getElementById('message-preview').textContent =
+      applyTpl(document.getElementById('pushover_message').value || '{title} — {price}');
+  }
+
+  let lastFocused = null;
+  document.querySelectorAll('.template-input').forEach(el => {
+    el.addEventListener('focus', () => { lastFocused = el; });
+  });
+
+  function insertVar(chip) {
+    const target = lastFocused ||
+      (document.activeElement?.classList.contains('template-input') ? document.activeElement : null) ||
+      document.getElementById('pushover_message');
+    if (!target) return;
+    const v = chip.textContent;
+    const s = target.selectionStart, e = target.selectionEnd;
+    target.value = target.value.slice(0, s) + v + target.value.slice(e);
+    target.selectionStart = target.selectionEnd = s + v.length;
+    target.focus();
+    updatePreviews();
+  }
+
+  // ── Test Pushover ─────────────────────────────────────────────────────────
+  document.getElementById('testPushoverBtn')?.addEventListener('click', async () => {
+    const btn = document.getElementById('testPushoverBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Sending…';
+    try {
+      const resp = await fetch('/api/test-pushover', { method: 'POST' });
+      const data = await resp.json();
+      if (data.ok) {
+        showToast('<i class="bi bi-check-circle me-1"></i>Test Pushover sent!', 'success');
+      } else {
+        showToast(`<i class="bi bi-exclamation-circle me-1"></i>${data.error || 'Failed to send.'}`, 'error');
+      }
+    } catch (_) {
+      showToast('<i class="bi bi-exclamation-circle me-1"></i>Request failed.', 'error');
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="bi bi-send me-1"></i>Test Pushover';
+    }
+  });
+
+  // ── Test n8n ──────────────────────────────────────────────────────────────
+  document.getElementById('testN8nBtn')?.addEventListener('click', async () => {
+    const btn = document.getElementById('testN8nBtn');
+    const urlInput = document.getElementById('n8n_webhook_url');
+    const url = urlInput?.value.trim();
+    if (!url) {
+      showToast('<i class="bi bi-exclamation-circle me-1"></i>Enter a webhook URL first.', 'error');
+      urlInput?.focus();
+      return;
+    }
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Sending…';
+    try {
+      const resp = await fetch('/api/test-n8n', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ webhook_url: url }),
+      });
+      const data = await resp.json();
+      if (data.ok) {
+        showToast('<i class="bi bi-check-circle me-1"></i>Test payload sent to n8n!', 'success');
+      } else {
+        showToast(`<i class="bi bi-exclamation-circle me-1"></i>${data.error || 'Failed to send.'}`, 'error');
+      }
+    } catch (_) {
+      showToast('<i class="bi bi-exclamation-circle me-1"></i>Request failed.', 'error');
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="bi bi-webhook me-1"></i>Test n8n';
+    }
+  });
+
+  // ── Live status update ────────────────────────────────────────────────────
+  async function updateStatus() {
+    try {
+      const res = await fetch('/api/queries');
+      const queries = await res.json();
+      for (const q of queries) {
+        const row = document.querySelector(`[data-qid="${q.id}"]`);
+        if (!row) continue;
+        const badge = statusBadge(q);
+        // Desktop status cell
+        const statusCell = row.querySelector('.status-cell');
+        if (statusCell) statusCell.innerHTML = badge;
+        // Mobile inline status (inside query name cell)
+        const mobileStatus = row.querySelector('.status-inline-mobile');
+        if (mobileStatus) mobileStatus.innerHTML = badge;
+        const lc = row.querySelector('.last-checked');
+        if (lc) { lc.textContent = relTime(q.last_checked); lc.dataset.ts = q.last_checked || ''; }
+        row.querySelector('.findings-count').textContent = q.findings_count;
+      }
+    } catch (_) { /* ignore network errors */ }
+  }
+
+  // ── Vinted URL parser ─────────────────────────────────────────────────────
+  function applyVintedUrl(urlInputId, prefix) {
+    const urlStr = document.getElementById(urlInputId).value.trim();
+    if (!urlStr) return;
+
+    const qIdx = urlStr.indexOf('?');
+    if (qIdx === -1) {
+      showToast('<i class="bi bi-info-circle me-1"></i>No query parameters found in URL.', 'error');
+      return;
+    }
+    const raw = {};
+    for (const part of urlStr.slice(qIdx + 1).split('&')) {
+      if (!part) continue;
+      const eq = part.indexOf('=');
+      if (eq === -1) continue;
+      try {
+        const k = decodeURIComponent(part.slice(0, eq));
+        const v = decodeURIComponent(part.slice(eq + 1));
+        (raw[k] = raw[k] || []).push(v);
+      } catch (_) {}
+    }
+
+    const get    = (k) => (raw[k] || [])[0] || '';
+    const getAll = (k) => (raw[k] || []).join(',');
+
+    const fields = {
+      search_text:  get('search_text'),
+      catalog_id:   get('catalog[]'),
+      price_from:   get('price_from'),
+      price_to:     get('price_to'),
+      brand_ids:    getAll('brand_ids[]'),
+      size_ids:     getAll('size_ids[]'),
+      color_ids:    getAll('color_ids[]'),
+      material_ids: getAll('material_ids[]'),
+      status_ids:   getAll('status_ids[]'),
+    };
+    let filled = 0;
+    for (const [key, val] of Object.entries(fields)) {
+      const el = document.getElementById(prefix + key);
+      if (el && val) { el.value = val; filled++; }
+    }
+    if (filled > 0) {
+      showToast(`<i class="bi bi-check-circle me-1"></i>Imported ${filled} field(s) from URL.`, 'success');
+    } else {
+      showToast('<i class="bi bi-info-circle me-1"></i>No recognizable filters found in URL.', 'error');
+    }
+  }
+
+  // ── Edit modal population ─────────────────────────────────────────────────
+  document.getElementById('editModal')?.addEventListener('show.bs.modal', function(e) {
+    const btn = e.relatedTarget;
+    const qid = btn.dataset.qid;
+    document.getElementById('editForm').action = `/queries/${qid}/edit`;
+    document.getElementById('edit_url').value = '';
+    document.getElementById('edit_name').value = btn.dataset.name || '';
+    document.getElementById('edit_search_text').value = btn.dataset.search || '';
+    document.getElementById('edit_catalog_id').value = btn.dataset.catalog || '';
+    document.getElementById('edit_price_from').value = btn.dataset.priceFrom || '';
+    document.getElementById('edit_price_to').value = btn.dataset.priceTo || '';
+    document.getElementById('edit_brand_ids').value = btn.dataset.brandIds || '';
+    document.getElementById('edit_size_ids').value = btn.dataset.sizeIds || '';
+    document.getElementById('edit_color_ids').value = btn.dataset.colorIds || '';
+    document.getElementById('edit_material_ids').value = btn.dataset.materialIds || '';
+    document.getElementById('edit_status_ids').value = btn.dataset.statusIds || '';
+    const sel = document.getElementById('edit_interval');
+    sel.value = btn.dataset.interval;
+    if (!sel.value) sel.value = '300';
+  });
+
+  // ── Init ──────────────────────────────────────────────────────────────────
+  document.addEventListener('DOMContentLoaded', () => {
+    document.querySelectorAll('[data-ts]').forEach(el => {
+      if (el.dataset.ts) el.textContent = relTime(el.dataset.ts);
+    });
+
+    document.getElementById('pushover_title')?.addEventListener('input', updatePreviews);
+    document.getElementById('pushover_message')?.addEventListener('input', updatePreviews);
+    updatePreviews();
+
+    setInterval(updateStatus, 10000);
+
+    setInterval(() => {
+      document.querySelectorAll('[data-ts]').forEach(el => {
+        if (el.dataset.ts) el.textContent = relTime(el.dataset.ts);
+      });
+    }, 60000);
+  });
+</script>
+</body>
+</html>
