@@ -97,6 +97,9 @@ class VintedScraper:
         self._on_blocked = on_blocked
         # Proxy toggle: alternates between proxy and no-proxy on each 403
         self._use_proxy = False
+        # Track which modes have been blocked — cooldown only triggers when both are blocked
+        self._direct_blocked = False
+        self._proxy_blocked = False
         self._apply_headers()
         self._init_session()
 
@@ -156,7 +159,13 @@ class VintedScraper:
 
     def _is_blocked(self) -> bool:
         """Return True if currently in a 403 cooldown period."""
-        return time.time() < self._blocked_until
+        if time.time() >= self._blocked_until:
+            # Cooldown expired — reset per-mode block flags
+            if self._direct_blocked or self._proxy_blocked:
+                self._direct_blocked = False
+                self._proxy_blocked = False
+            return False
+        return True
 
     def _toggle_proxy(self):
         """Toggle proxy on/off on each 403. No-op if VINTED_PROXY is not configured."""
@@ -172,12 +181,37 @@ class VintedScraper:
             print("🔀 Switching to direct connection (no proxy)")
 
     def _set_blocked(self):
-        """Activate block cooldown, toggle proxy, and fire the callback."""
+        """Handle a 403 response.
+
+        If proxy is configured: mark the current mode as blocked and switch to the
+        other mode.  Only start the cooldown (and fire the callback) once both modes
+        have been blocked, meaning there is nowhere left to try.
+        """
+        if VINTED_PROXY:
+            # Mark the mode that just failed
+            if self._use_proxy:
+                self._proxy_blocked = True
+            else:
+                self._direct_blocked = True
+
+            both_blocked = self._proxy_blocked and self._direct_blocked
+
+            if not both_blocked:
+                # The other mode is still available — switch and keep going
+                self._toggle_proxy()
+                mode = "proxy" if self._use_proxy else "direct"
+                print(f"🚫 Blocked (403) in {'proxy' if not self._use_proxy else 'direct'} mode — "
+                      f"switching to {mode} and retrying...")
+                return
+
+            # Both modes exhausted — fall through to full cooldown
+            print("🚫 Blocked in both proxy and direct mode — entering full cooldown.")
+
+        # No proxy configured, or both modes exhausted: start cooldown
         self._blocked_until = time.time() + BLOCK_WAIT_SECONDS
         wait_min = BLOCK_WAIT_SECONDS // 60
         print(f"🚫 Blocked by Vinted (403)! Pausing all requests for {wait_min} minutes "
               f"(until {datetime.fromtimestamp(self._blocked_until).strftime('%H:%M:%S')})...")
-        self._toggle_proxy()
         if self._on_blocked:
             try:
                 self._on_blocked(wait_min)
@@ -466,20 +500,21 @@ class VintedScraper:
             if not items:
                 break
 
-            # Track the absolute newest item (first item on first page)
-            if newest_id_this_run is None and items:
-                newest_id_this_run = items[0].get("id")
+            # Track the highest item ID seen across all pages
+            page_max_id = max((item.get("id") for item in items if item.get("id") is not None), default=None)
+            if page_max_id is not None and (newest_id_this_run is None or page_max_id > newest_id_this_run):
+                newest_id_this_run = page_max_id
 
             # First run: just grab page 1 to record the newest ID — no need to paginate
             if is_first_run:
                 new_items.extend(items)
                 break
 
-            # Subsequent runs: collect items until we hit the last seen ID
+            # Subsequent runs: collect items until we hit or pass the last seen ID
             found_old = False
             for item in items:
                 item_id = item.get("id")
-                if item_id == last_seen_id:
+                if item_id is not None and item_id <= last_seen_id:
                     found_old = True
                     break
                 new_items.append(item)

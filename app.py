@@ -485,8 +485,9 @@ class MonitorScheduler:
             if not items:
                 break
 
-            if newest_id is None:
-                newest_id = items[0].get("id")
+            page_max_id = max((item.get("id") for item in items if item.get("id") is not None), default=None)
+            if page_max_id is not None and (newest_id is None or page_max_id > newest_id):
+                newest_id = page_max_id
 
             if is_first_run:
                 # First run: just establish the baseline (page 1 only)
