@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Vinted Monitor — Web interface for monitoring Vinted listings."""
+"""iteted Monitor — Web interface for monitoring Vinted listings."""
 
 import os
+import sys
 import time
 import random
 import sqlite3
@@ -35,6 +36,32 @@ DEFAULT_PUSHOVER_TITLE = "New Vinted: {query}"
 DEFAULT_PUSHOVER_MESSAGE = "{title} — {price}"
 
 os.makedirs(DATA_DIR, exist_ok=True)
+
+# ── Log-to-file (set LOG_FILE env var to enable) ──────────────────────────────
+
+LOG_FILE = os.environ.get("LOG_FILE", "")
+
+if LOG_FILE:
+    class _Tee:
+        """Write to both the original stream and a log file simultaneously."""
+        def __init__(self, stream, path):
+            self._stream = stream
+            self._file = open(path, "a", encoding="utf-8", buffering=1)
+
+        def write(self, data):
+            self._stream.write(data)
+            self._file.write(data)
+
+        def flush(self):
+            self._stream.flush()
+            self._file.flush()
+
+        def fileno(self):
+            return self._stream.fileno()
+
+    sys.stdout = _Tee(sys.stdout, LOG_FILE)
+    sys.stderr = _Tee(sys.stderr, LOG_FILE)
+    print(f"[App] Logging to file: {LOG_FILE}", flush=True)
 
 app = Flask(__name__)
 
@@ -72,6 +99,7 @@ def init_db():
                 color_ids        TEXT,
                 material_ids     TEXT,
                 status_ids       TEXT,
+                exclude_keywords TEXT,
                 interval_seconds INTEGER NOT NULL DEFAULT 300,
                 enabled          INTEGER NOT NULL DEFAULT 1,
                 last_checked     TEXT,
@@ -89,6 +117,7 @@ def init_db():
                 url        TEXT,
                 image_url  TEXT,
                 found_at   TEXT NOT NULL,
+                excluded   INTEGER NOT NULL DEFAULT 0,
                 UNIQUE(query_id, item_id),
                 FOREIGN KEY (query_id) REFERENCES queries(id) ON DELETE CASCADE
             );
@@ -104,6 +133,14 @@ def init_db():
                 conn.execute(f"ALTER TABLE queries ADD COLUMN {col} TEXT")
             except Exception:
                 pass  # Column already exists
+        try:
+            conn.execute("ALTER TABLE queries ADD COLUMN exclude_keywords TEXT")
+        except Exception:
+            pass
+        try:
+            conn.execute("ALTER TABLE findings ADD COLUMN excluded INTEGER NOT NULL DEFAULT 0")
+        except Exception:
+            pass
 
 
 def get_setting(key: str, default: str = "") -> str:
@@ -141,6 +178,18 @@ def ids_to_db(value: str):
     """Normalize comma-separated ID string for DB storage. Returns None if empty."""
     ids = parse_ids(value)
     return ','.join(str(i) for i in ids) if ids else None
+
+
+def is_excluded(title: str, exclude_keywords: str) -> bool:
+    """Return True if title contains any comma-separated exclude keyword (case-insensitive)."""
+    if not exclude_keywords:
+        return False
+    title_lower = title.lower()
+    for kw in exclude_keywords.split(','):
+        kw = kw.strip().lower()
+        if kw and kw in title_lower:
+            return True
+    return False
 
 
 # ── Pushover ──────────────────────────────────────────────────────────────────
@@ -320,10 +369,11 @@ class MonitorScheduler:
         color_ids = parse_ids(query.get("color_ids"))
         material_ids = parse_ids(query.get("material_ids"))
         status_ids = parse_ids(query.get("status_ids"))
+        exclude_keywords = query.get("exclude_keywords") or ""
         last_seen_id = query.get("last_seen_id")
         is_first_run = last_seen_id is None
 
-        print(f"[Scheduler] Polling: '{search_text}'", flush=True)
+        print(f"[Scheduler] Polling: '{search_text}' (qid={qid}, last_seen_id={last_seen_id})", flush=True)
 
         with get_db() as conn:
             conn.execute(
@@ -337,7 +387,14 @@ class MonitorScheduler:
                 last_seen_id,
             )
 
+            print(
+                f"[Scheduler] fetch done: {len(new_items)} new item(s), "
+                f"newest_id={newest_id}, new_ids={[i.get('id') for i in new_items]}",
+                flush=True,
+            )
+
             now_iso = datetime.now().isoformat()
+            truly_new_items = []
             with get_db() as conn:
                 conn.execute(
                     """UPDATE queries
@@ -346,6 +403,11 @@ class MonitorScheduler:
                        WHERE id = ?""",
                     (now_iso, newest_id, qid),
                 )
+                # Verify what was actually saved
+                saved = conn.execute(
+                    "SELECT last_seen_id FROM queries WHERE id = ?", (qid,)
+                ).fetchone()
+                print(f"[Scheduler] DB saved last_seen_id={saved['last_seen_id']} for qid={qid}", flush=True)
 
                 if not is_first_run and new_items:
                     for item in new_items:
@@ -356,10 +418,11 @@ class MonitorScheduler:
                         )
                         photo = item.get("photo") or {}
                         image_url = photo.get("url", "")
-                        conn.execute(
+                        item_excluded = is_excluded(item.get("title", ""), exclude_keywords)
+                        result = conn.execute(
                             """INSERT OR IGNORE INTO findings
-                               (query_id, item_id, title, price, url, image_url, found_at)
-                               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                               (query_id, item_id, title, price, url, image_url, found_at, excluded)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                             (
                                 qid,
                                 item.get("id"),
@@ -368,10 +431,26 @@ class MonitorScheduler:
                                 item.get("url", ""),
                                 image_url,
                                 now_iso,
+                                1 if item_excluded else 0,
                             ),
                         )
+                        if result.rowcount > 0:
+                            if item_excluded:
+                                print(
+                                    f"[Scheduler] Excluded item {item.get('id')} "
+                                    f"('{item.get('title', '')}') for qid={qid}",
+                                    flush=True,
+                                )
+                            else:
+                                truly_new_items.append(item)
+                        else:
+                            print(
+                                f"[Scheduler] Skipping already-notified item {item.get('id')} for qid={qid}",
+                                flush=True,
+                            )
 
-            if not is_first_run and new_items:
+            if not is_first_run and truly_new_items:
+                new_items = truly_new_items
                 label = query.get("name") or search_text
                 print(
                     f"[Scheduler] {len(new_items)} new item(s) for '{search_text}'",
@@ -461,6 +540,7 @@ class MonitorScheduler:
         """Fetch items newer than last_seen_id. Returns (new_items, newest_id)."""
         is_first_run = last_seen_id is None
         new_items = []
+        seen_ids = set()
         newest_id = None
         page = 1
 
@@ -485,9 +565,16 @@ class MonitorScheduler:
             if not items:
                 break
 
-            page_max_id = max((item.get("id") for item in items if item.get("id") is not None), default=None)
+            page_item_ids = [item.get("id") for item in items]
+            page_max_id = max((i for i in page_item_ids if i is not None), default=None)
             if page_max_id is not None and (newest_id is None or page_max_id > newest_id):
                 newest_id = page_max_id
+
+            print(
+                f"[fetch] page={page}/{total_pages}, last_seen_id={last_seen_id}, "
+                f"page_ids={page_item_ids}",
+                flush=True,
+            )
 
             if is_first_run:
                 # First run: just establish the baseline (page 1 only)
@@ -496,10 +583,13 @@ class MonitorScheduler:
 
             found_old = False
             for item in items:
-                if item.get("id") <= last_seen_id:
+                item_id = item.get("id")
+                if item_id is not None and item_id <= last_seen_id:
                     found_old = True
                     break
-                new_items.append(item)
+                if item_id not in seen_ids:
+                    seen_ids.add(item_id)
+                    new_items.append(item)
 
             if found_old or page >= total_pages:
                 break
@@ -625,6 +715,7 @@ def add_query():
     color_ids_raw = request.form.get("color_ids", "")
     material_ids_raw = request.form.get("material_ids", "")
     status_ids_raw = request.form.get("status_ids", "")
+    exclude_keywords_raw = request.form.get("exclude_keywords", "").strip() or None
 
     # Require at least a search text or one filter
     has_filter = any([catalog_id, price_from, price_to,
@@ -638,8 +729,8 @@ def add_query():
             """INSERT INTO queries
                (name, search_text, catalog_id, price_from, price_to,
                 brand_ids, size_ids, color_ids, material_ids, status_ids,
-                interval_seconds, enabled, status, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'pending', ?)""",
+                exclude_keywords, interval_seconds, enabled, status, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'pending', ?)""",
             (
                 name,
                 search_text,
@@ -651,6 +742,7 @@ def add_query():
                 ids_to_db(color_ids_raw),
                 ids_to_db(material_ids_raw),
                 ids_to_db(status_ids_raw),
+                exclude_keywords_raw,
                 int(interval) if interval else 300,
                 datetime.now().isoformat(),
             ),
@@ -712,6 +804,7 @@ def edit_query(qid):
     new_color_ids = ids_to_db(request.form.get("color_ids", ""))
     new_material_ids = ids_to_db(request.form.get("material_ids", ""))
     new_status_ids = ids_to_db(request.form.get("status_ids", ""))
+    new_exclude_keywords = request.form.get("exclude_keywords", "").strip() or None
 
     with get_db() as conn:
         current = conn.execute(
@@ -721,6 +814,7 @@ def edit_query(qid):
             return redirect(url_for("index"))
 
         # Reset baseline only when the actual search parameters change
+        # (exclude_keywords is a post-fetch filter — no baseline reset needed)
         search_changed = (
             current["search_text"] != search_text
             or current["catalog_id"] != new_catalog
@@ -739,11 +833,12 @@ def edit_query(qid):
                    price_from = ?, price_to = ?,
                    brand_ids = ?, size_ids = ?, color_ids = ?,
                    material_ids = ?, status_ids = ?,
+                   exclude_keywords = ?,
                    interval_seconds = ?
                WHERE id = ?""",
             (name, search_text, new_catalog, new_price_from, new_price_to,
              new_brand_ids, new_size_ids, new_color_ids, new_material_ids,
-             new_status_ids, new_interval, qid),
+             new_status_ids, new_exclude_keywords, new_interval, qid),
         )
         if search_changed:
             conn.execute(

@@ -485,6 +485,7 @@ class VintedScraper:
         is_first_run = last_seen_id is None
 
         new_items = []
+        seen_ids = set()
         page = 1
         newest_id_this_run = None
         search_session_id = str(uuid.uuid4())  # stable across pages of the same search
@@ -517,7 +518,9 @@ class VintedScraper:
                 if item_id is not None and item_id <= last_seen_id:
                     found_old = True
                     break
-                new_items.append(item)
+                if item_id not in seen_ids:
+                    seen_ids.add(item_id)
+                    new_items.append(item)
 
             if found_old or page >= total_pages:
                 break

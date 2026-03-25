@@ -158,9 +158,12 @@
                 {% if q.status_ids %}
                   <span class="badge bg-secondary me-1">Conditions: {{ q.status_ids }}</span>
                 {% endif %}
+                {% if q.exclude_keywords %}
+                  <span class="badge bg-warning text-dark me-1" title="Exclude filter">Excl: {{ q.exclude_keywords }}</span>
+                {% endif %}
                 {% if not q.catalog_id and not q.price_from and not q.price_to
                       and not q.brand_ids and not q.size_ids and not q.color_ids
-                      and not q.material_ids and not q.status_ids %}
+                      and not q.material_ids and not q.status_ids and not q.exclude_keywords %}
                   <span class="text-muted">—</span>
                 {% endif %}
               </td>
@@ -221,6 +224,7 @@
                           data-color-ids="{{ q.color_ids or '' }}"
                           data-material-ids="{{ q.material_ids or '' }}"
                           data-status-ids="{{ q.status_ids or '' }}"
+                          data-exclude-keywords="{{ q.exclude_keywords or '' }}"
                           data-interval="{{ q.interval_seconds }}">
                     <i class="bi bi-pencil"></i>
                   </button>
@@ -265,6 +269,7 @@
                                 data-color-ids="{{ q.color_ids or '' }}"
                                 data-material-ids="{{ q.material_ids or '' }}"
                                 data-status-ids="{{ q.status_ids or '' }}"
+                                data-exclude-keywords="{{ q.exclude_keywords or '' }}"
                                 data-interval="{{ q.interval_seconds }}">
                           <i class="bi bi-pencil me-2"></i>Edit
                         </button>
@@ -399,6 +404,13 @@
             </div>
           </div>
 
+          <div class="mb-3">
+            <label class="form-label fw-semibold">Exclude Keywords <span class="text-muted fw-normal">(optional)</span></label>
+            <input type="text" name="exclude_keywords" id="add_exclude_keywords" class="form-control"
+                   placeholder="e.g. broken, cracked, parts only">
+            <div class="form-text">Comma-separated words or phrases. Items whose title contains any of these (case-insensitive) will be stored but <strong>not notified</strong>.</div>
+          </div>
+
           <div class="mb-1">
             <label class="form-label">Poll Interval</label>
             <select name="interval_seconds" class="form-select">
@@ -502,6 +514,13 @@
               <input type="text" name="status_ids" id="edit_status_ids" class="form-control" placeholder="e.g. 6,1">
               <div class="form-text">Comma-separated</div>
             </div>
+          </div>
+
+          <div class="mb-3">
+            <label class="form-label fw-semibold">Exclude Keywords <span class="text-muted fw-normal">(optional)</span></label>
+            <input type="text" name="exclude_keywords" id="edit_exclude_keywords" class="form-control"
+                   placeholder="e.g. broken, cracked, parts only">
+            <div class="form-text">Comma-separated words or phrases. Items whose title contains any of these (case-insensitive) will be stored but <strong>not notified</strong>.</div>
           </div>
 
           <div class="mb-1">
@@ -721,7 +740,8 @@
     }
     const cards = findings.map(f => `
       <div class="col">
-        <div class="card h-100 finding-card shadow-sm">
+        <div class="card h-100 finding-card shadow-sm${f.excluded ? ' border-secondary' : ''}"
+             style="${f.excluded ? 'opacity:.55' : ''}">
           ${f.image_url
             ? `<img src="${escHtml(f.image_url)}" class="finding-img card-img-top"
                     alt="${escHtml(f.title)}" loading="lazy"
@@ -731,13 +751,14 @@
             <i class="bi bi-image text-muted" style="font-size:2rem"></i>
           </div>
           <div class="card-body p-2">
-            <div class="fw-semibold text-success mb-1" style="font-size:.85rem">${escHtml(f.price)}</div>
-            <div class="mb-1" style="font-size:.78rem;line-height:1.3;max-height:2.6em;overflow:hidden">${escHtml(f.title)}</div>
+            ${f.excluded ? '<span class="badge bg-secondary mb-1" style="font-size:.65rem"><i class="bi bi-slash-circle me-1"></i>Excluded</span>' : ''}
+            <div class="fw-semibold ${f.excluded ? 'text-muted' : 'text-success'} mb-1" style="font-size:.85rem">${escHtml(f.price)}</div>
+            <div class="mb-1${f.excluded ? ' text-decoration-line-through text-muted' : ''}" style="font-size:.78rem;line-height:1.3;max-height:2.6em;overflow:hidden">${escHtml(f.title)}</div>
             <div class="text-muted" style="font-size:.7rem">${relTime(f.found_at)}</div>
           </div>
           <div class="card-footer p-2 bg-transparent border-0">
             <a href="${escHtml(f.url)}" target="_blank" rel="noopener"
-               class="btn btn-outline-primary btn-sm w-100" style="font-size:.75rem">
+               class="btn btn-outline-${f.excluded ? 'secondary' : 'primary'} btn-sm w-100" style="font-size:.75rem">
               View on Vinted
             </a>
           </div>
@@ -978,6 +999,7 @@
     document.getElementById('edit_color_ids').value = btn.dataset.colorIds || '';
     document.getElementById('edit_material_ids').value = btn.dataset.materialIds || '';
     document.getElementById('edit_status_ids').value = btn.dataset.statusIds || '';
+    document.getElementById('edit_exclude_keywords').value = btn.dataset.excludeKeywords || '';
     const sel = document.getElementById('edit_interval');
     sel.value = btn.dataset.interval;
     if (!sel.value) sel.value = '300';
