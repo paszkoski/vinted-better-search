@@ -78,10 +78,10 @@
         <div class="col-md-2">
           <label class="form-label">Sort candidates by</label>
           <select id="order" class="form-select">
-            <option value="relevance" selected>Relevance</option>
-            <option value="newest_first">Newest first</option>
-            <option value="price_low_to_high">Price: low to high</option>
+            <option value="price_low_to_high" selected>Price: low to high</option>
             <option value="price_high_to_low">Price: high to low</option>
+            <option value="newest_first">Newest first</option>
+            <option value="relevance">Relevance</option>
           </select>
         </div>
         <div class="col-md-2">
@@ -176,6 +176,7 @@
             <div class="fw-semibold text-success mb-1" style="font-size:.9rem">${priceStr}</div>
             <div class="mb-1" style="font-size:.85rem;line-height:1.3">${highlight(r.title, includeTerms)}</div>
             ${r.brand ? `<div class="text-muted" style="font-size:.75rem">${escHtml(r.brand)}${r.size ? ' · ' + escHtml(r.size) : ''}</div>` : ''}
+            ${(r.listed_at || r.country) ? `<div class="text-muted" style="font-size:.7rem">${[r.listed_at, r.country].filter(Boolean).map(escHtml).join(' · ')}</div>` : ''}
             ${snippet}
           </div>
           <div class="card-footer p-2 bg-transparent border-0">

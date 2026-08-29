@@ -6,7 +6,7 @@ VINTED_BASE_URL = os.environ.get("VINTED_BASE_URL", "https://www.vinted.pl")
 VINTED_API_URL = f"{VINTED_BASE_URL}/api/v2"
 
 DEFAULT_CURRENCY = "PLN"
-DEFAULT_ORDER = "relevance"
+DEFAULT_ORDER = "price_low_to_high"
 CATALOG_PER_PAGE = 96  # Vinted's server-side max for catalog/items
 
 BLOCK_WAIT_SECONDS = int(os.environ.get("BLOCK_WAIT_SECONDS", 1800))  # 30 min default

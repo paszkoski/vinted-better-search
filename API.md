@@ -33,7 +33,7 @@ GET /api/search
 | `catalog_ids`  | string | no       | Comma-separated Vinted category IDs. |
 | `price_from`   | float  | no       | Minimum price. |
 | `price_to`     | float  | no       | Maximum price. |
-| `order`        | string | no       | One of `relevance` (default), `newest_first`, `price_low_to_high`, `price_high_to_low`. Only affects the order Vinted's own search hands back candidates — final results are still filtered strictly by keyword. |
+| `order`        | string | no       | One of `price_low_to_high` (default), `price_high_to_low`, `newest_first`, `relevance`. Only affects the order Vinted's own search hands back candidates — final results are still filtered strictly by keyword. |
 | `max_results`  | int    | no       | Stop once this many matches are found (default 40, max 100). |
 | `max_scan`     | int    | no       | Stop after scanning this many candidate items even if `max_results` isn't reached (default 200, max 500). |
 
@@ -53,7 +53,9 @@ GET /api/search
       "brand": "Keychron",
       "size": "",
       "status": "Very good",
-      "favourite_count": 3
+      "favourite_count": 3,
+      "listed_at": "2026-08-15",
+      "country": "Polska"
     }
   ],
   "scanned": 96,
@@ -64,6 +66,8 @@ GET /api/search
 }
 ```
 
+- `listed_at` — Vinted doesn't expose a real listing date; this is the main photo's upload date, the closest available proxy.
+- `country` — the seller's country, resolved from their public profile (fetched only for the final results shown, not every scanned candidate); `null` if it couldn't be resolved.
 - `scanned` — how many of Vinted's own candidate results were examined.
 - `fetched` — how many of those needed a description fetch (title alone wasn't conclusive).
 - `truncated` — `max_scan` was hit before `max_results` — try narrowing keywords or raising `max_scan`.

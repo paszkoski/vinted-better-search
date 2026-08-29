@@ -101,9 +101,11 @@ class VintedScraper:
         self._proxy_blocked = False
         # In-memory description cache: item_id -> description (or "" if none/unavailable)
         self._description_cache: dict[int, str] = {}
+        # In-memory seller-country cache: user_id -> {"title": ..., "code": ...} or None
+        self._country_cache: dict[int, dict | None] = {}
         self._cache_lock = threading.Lock()
         self._block_lock = threading.Lock()
-        # Bounds how many item-description fetches run in flight at once
+        # Bounds how many item-description / user-profile fetches run in flight at once
         self._detail_semaphore = threading.Semaphore(DETAIL_CONCURRENCY)
         self._apply_headers()
         self._init_session()
@@ -411,6 +413,78 @@ class VintedScraper:
         except json.JSONDecodeError:
             return ""
         return data.get("description", "") if isinstance(data, dict) else ""
+
+    # ── Seller country ────────────────────────────────────────────────────────
+
+    def get_user_country(self, user_id: int) -> dict | None:
+        """
+        Fetch a seller's country via their public profile.
+
+        Returns {"title": "Czechy", "code": "CZ"}, or None if unavailable
+        (blocked / removed / network error). Cached in-memory per scraper
+        instance — a seller's country essentially never changes.
+
+        Shares the same concurrency bound as `get_item_description` — call
+        this from multiple threads for a batch instead of one at a time.
+        """
+        if not user_id:
+            return None
+
+        with self._cache_lock:
+            if user_id in self._country_cache:
+                return self._country_cache[user_id]
+
+        if self._is_blocked():
+            return None
+
+        with self._detail_semaphore:
+            if self._is_blocked():
+                return None
+            try:
+                time.sleep(random.uniform(0.0, DETAIL_JITTER_SECONDS))
+                resp = self.session.get(f"{VINTED_API_URL}/users/{user_id}", timeout=15)
+
+                if resp.status_code == 403:
+                    print("403 Forbidden on user profile — entering block cooldown.")
+                    self._set_blocked()
+                    return None
+                if resp.status_code == 404:
+                    self._cache_country(user_id, None)
+                    return None
+
+                resp.raise_for_status()
+                data = resp.json().get("user") or {}
+                title = data.get("country_title")
+                code = data.get("country_iso_code")
+                country = {"title": title, "code": code} if title or code else None
+                self._cache_country(user_id, country)
+                return country
+            except requests.RequestException as e:
+                print(f"User profile fetch failed for {user_id}: {e}")
+                return None
+
+    def get_user_countries(self, user_ids: list[int]) -> dict[int, dict | None]:
+        """Fetch seller countries for multiple user ids concurrently."""
+        results: dict[int, dict | None] = {}
+        unique_ids = {uid for uid in user_ids if uid}
+        if not unique_ids:
+            return results
+
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=DETAIL_CONCURRENCY) as pool:
+            futures = {
+                pool.submit(self.get_user_country, uid): uid
+                for uid in unique_ids
+            }
+            for future in futures:
+                uid = futures[future]
+                results[uid] = future.result()
+        return results
+
+    def _cache_country(self, user_id: int, country: dict | None):
+        with self._cache_lock:
+            self._country_cache[user_id] = country
 
 
 def main():

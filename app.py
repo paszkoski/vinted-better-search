@@ -5,6 +5,7 @@ import os
 import sys
 import time
 import threading
+from datetime import datetime, timezone
 
 from flask import Flask, render_template, request, jsonify
 
@@ -82,7 +83,19 @@ def build_result(item: dict, description: str | None) -> dict:
         "size": item.get("size_title", ""),
         "status": item.get("status", ""),
         "favourite_count": item.get("favourite_count", 0),
+        "listed_at": _photo_upload_date(photo),
+        "seller_id": (item.get("user") or {}).get("id"),
+        "country": None,  # filled in by run_search once results are final
     }
+
+
+def _photo_upload_date(photo: dict) -> str | None:
+    """Vinted doesn't expose a listing date directly — the main photo's
+    upload timestamp is the closest available proxy for "date listed"."""
+    timestamp = (photo.get("high_resolution") or {}).get("timestamp")
+    if not timestamp:
+        return None
+    return datetime.fromtimestamp(timestamp, tz=timezone.utc).date().isoformat()
 
 
 def run_search(
@@ -167,6 +180,18 @@ def run_search(
         if page >= total_pages:
             break
         page += 1
+
+    # Country needs a per-seller profile fetch — only worth doing for the
+    # items actually being shown, not every candidate that got scanned.
+    seller_ids = [r["seller_id"] for r in results if r["seller_id"]]
+    if seller_ids:
+        countries = scraper.get_user_countries(seller_ids)
+        for r in results:
+            country = countries.get(r["seller_id"])
+            if country:
+                r["country"] = country.get("title") or country.get("code")
+    for r in results:
+        r.pop("seller_id", None)
 
     return {
         "results": results,
