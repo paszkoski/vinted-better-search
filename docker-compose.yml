@@ -1,23 +1,21 @@
 services:
-  vinted-monitor:
+  vinted-better-search:
     image: python:3.11-slim
-    container_name: vinted-monitor
+    container_name: vinted-better-search
     working_dir: /app
     volumes:
       - .:/app:ro              # source code (read-only)
-      - vinted-data:/app/data  # persistent SQLite database (writable)
     command: >
       sh -c "pip install -r requirements.txt -q --no-cache-dir &&
              python app.py"
     ports:
       - "${PORT:-5000}:5000"
     environment:
-      - PUSHOVER_TOKEN         # Pushover app token (optional)
-      - PUSHOVER_USER          # Pushover user key (optional)
       - VINTED_BASE_URL        # e.g. https://www.vinted.de (optional, defaults to vinted.pl)
       - PORT                   # web port inside container (optional, default 5000)
       - BLOCK_WAIT_SECONDS     # seconds to pause after a 403 block (optional, default 1800 = 30 min)
-      - MIN_API_DELAY          # minimum seconds between API requests (optional, default 1.5)
+      - MIN_API_DELAY          # minimum seconds between catalog search requests (optional, default 1.5)
+      - MIN_DETAIL_DELAY       # minimum seconds between item-description fetches (optional, default 0.6)
       - VINTED_PROXY           # proxy in host:port format, e.g. 1.2.3.4:8080 (optional)
     restart: unless-stopped
     healthcheck:
@@ -30,7 +28,3 @@ services:
       timeout: 10s
       retries: 3
       start_period: 60s        # give pip install time to finish on first start
-
-volumes:
-  vinted-data:
-    name: vinted-monitor-data

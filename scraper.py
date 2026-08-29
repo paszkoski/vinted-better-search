@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 """
-Vinted Scraper — Search and monitor items on Vinted.
+Vinted Scraper — search Vinted's catalog and fetch per-item descriptions.
 
-Usage:
-    python scraper.py                                   # Search with default query
-    python scraper.py "xreal beam pro"                   # Search with custom query
-    python scraper.py "xreal beam pro" --catalog 2994    # Filter by category
-    python scraper.py --monitor                          # Monitor mode (polls every 5 min)
-    python scraper.py --monitor --catalog 2994           # Monitor with category filter
+Vinted's own `catalog/items` API only returns a title for each item — no
+description — so its search silently ignores whatever the description
+contains. `get_item_description()` fetches the public item page and pulls
+the description back out of the JSON-LD `<script type="application/ld+json">`
+block Vinted embeds in every item page, which is what makes real
+title-or-description keyword matching possible.
+
+Usage (CLI, for manual testing):
+    python scraper.py "xreal beam pro"
+    python scraper.py "xreal beam pro" --catalog 2994
 """
 
-import sys
+import re
 import json
 import time
 import uuid
@@ -18,26 +22,19 @@ import random
 import secrets
 import argparse
 import requests
-from datetime import datetime
 
 from config import (
     VINTED_BASE_URL,
     VINTED_API_URL,
-    DEFAULT_SEARCH_QUERY,
     DEFAULT_CURRENCY,
     DEFAULT_ORDER,
-    DEFAULT_PER_PAGE,
-    DEFAULT_CATALOG_ID,
-    DEFAULT_PRICE_FROM,
-    DEFAULT_PRICE_TO,
-    STATE_FILE,
-    POLL_INTERVAL,
+    CATALOG_PER_PAGE,
     SESSION_REFRESH_INTERVAL,
     BLOCK_WAIT_SECONDS,
     MIN_API_DELAY,
-    NOTIFY_N8N_ENABLED,
-    N8N_WEBHOOK_URL,
+    MIN_DETAIL_DELAY,
     VINTED_PROXY,
+    DESCRIPTION_CACHE_SIZE,
 )
 
 # ── Mobile app profiles (from real iOS Vinted app traffic) ────────────────────
@@ -76,9 +73,11 @@ MOBILE_PROFILES = [
     },
 ]
 
+_LD_JSON_TAG = 'application/ld+json">'
+
 
 class VintedScraper:
-    """Scraper for Vinted catalog items."""
+    """Scraper for Vinted catalog search + item descriptions."""
 
     def __init__(self, on_blocked=None):
         self.session = requests.Session()
@@ -97,28 +96,21 @@ class VintedScraper:
         self._on_blocked = on_blocked
         # Proxy toggle: alternates between proxy and no-proxy on each 403
         self._use_proxy = False
-        # Track which modes have been blocked — cooldown only triggers when both are blocked
         self._direct_blocked = False
         self._proxy_blocked = False
+        # In-memory description cache: item_id -> description (or "" if none/unavailable)
+        self._description_cache: dict[int, str] = {}
         self._apply_headers()
         self._init_session()
 
     # ── Header / profile management ───────────────────────────────────────────
 
     def _rotate_profile(self):
-        """Pick a new random mobile profile and rotate per-session identifiers."""
         self._profile = random.choice(MOBILE_PROFILES)
         self._session_id = str(uuid.uuid4())
         self._agent_id = str(uuid.uuid4())
 
     def _apply_headers(self):
-        """Apply current mobile-app headers to the session.
-
-        Header order matches the real iOS app GET request fingerprint observed in HAR:
-        X-Session-Id, Accept, Locale, Accept-Language, Accept-Encoding,
-        X-Anon-Id, X-Device-UUID, User-Agent, Connection, Short-Bundle-Version,
-        X-ICloud-Identifier, X-Device-Model, X-App-Version, then extra device headers.
-        """
         p = self._profile
         self.session.headers.clear()
         self.session.headers.update({
@@ -145,12 +137,6 @@ class VintedScraper:
         })
 
     def _update_vudt_header(self):
-        """Sync X-V-Udt header from the v_udt session cookie.
-
-        Vinted's iOS app sends the v_udt cookie value as the X-V-Udt request header.
-        This token is used for device integrity verification — omitting it or sending
-        a stale/mismatched value triggers bot detection.
-        """
         v_udt = self.session.cookies.get("v_udt")
         if v_udt:
             self.session.headers["X-V-Udt"] = v_udt
@@ -158,9 +144,7 @@ class VintedScraper:
     # ── Block detection / cooldown ────────────────────────────────────────────
 
     def _is_blocked(self) -> bool:
-        """Return True if currently in a 403 cooldown period."""
         if time.time() >= self._blocked_until:
-            # Cooldown expired — reset per-mode block flags
             if self._direct_blocked or self._proxy_blocked:
                 self._direct_blocked = False
                 self._proxy_blocked = False
@@ -168,27 +152,19 @@ class VintedScraper:
         return True
 
     def _toggle_proxy(self):
-        """Toggle proxy on/off on each 403. No-op if VINTED_PROXY is not configured."""
         if not VINTED_PROXY:
             return
         self._use_proxy = not self._use_proxy
         if self._use_proxy:
             proxy_url = f"http://{VINTED_PROXY}"
             self.session.proxies = {"http": proxy_url, "https": proxy_url}
-            print(f"🔀 Switching to proxy: {VINTED_PROXY}")
+            print(f"Switching to proxy: {VINTED_PROXY}")
         else:
             self.session.proxies = {}
-            print("🔀 Switching to direct connection (no proxy)")
+            print("Switching to direct connection (no proxy)")
 
     def _set_blocked(self):
-        """Handle a 403 response.
-
-        If proxy is configured: mark the current mode as blocked and switch to the
-        other mode.  Only start the cooldown (and fire the callback) once both modes
-        have been blocked, meaning there is nowhere left to try.
-        """
         if VINTED_PROXY:
-            # Mark the mode that just failed
             if self._use_proxy:
                 self._proxy_blocked = True
             else:
@@ -197,52 +173,45 @@ class VintedScraper:
             both_blocked = self._proxy_blocked and self._direct_blocked
 
             if not both_blocked:
-                # The other mode is still available — switch and keep going
                 self._toggle_proxy()
                 mode = "proxy" if self._use_proxy else "direct"
-                print(f"🚫 Blocked (403) in {'proxy' if not self._use_proxy else 'direct'} mode — "
-                      f"switching to {mode} and retrying...")
+                print(f"Blocked (403) — switching to {mode} and retrying...")
                 return
 
-            # Both modes exhausted — fall through to full cooldown
-            print("🚫 Blocked in both proxy and direct mode — entering full cooldown.")
+            print("Blocked in both proxy and direct mode — entering full cooldown.")
 
-        # No proxy configured, or both modes exhausted: start cooldown
         self._blocked_until = time.time() + BLOCK_WAIT_SECONDS
         wait_min = BLOCK_WAIT_SECONDS // 60
-        print(f"🚫 Blocked by Vinted (403)! Pausing all requests for {wait_min} minutes "
-              f"(until {datetime.fromtimestamp(self._blocked_until).strftime('%H:%M:%S')})...")
+        print(f"Blocked by Vinted (403)! Pausing all requests for {wait_min} minutes...")
         if self._on_blocked:
             try:
                 self._on_blocked(wait_min)
             except Exception as e:
-                print(f"⚠️  Block notification error: {e}")
+                print(f"Block notification error: {e}")
 
     # ── Request throttling ────────────────────────────────────────────────────
 
-    def _throttle(self):
-        """Sleep so that at least MIN_API_DELAY seconds pass between requests."""
+    def _throttle(self, min_delay: float):
         elapsed = time.time() - self._last_request_time
-        if elapsed < MIN_API_DELAY:
-            wait = MIN_API_DELAY - elapsed + random.uniform(0.0, 0.5)
+        if elapsed < min_delay:
+            wait = min_delay - elapsed + random.uniform(0.0, 0.4)
             time.sleep(wait)
 
     # ── Session management ────────────────────────────────────────────────────
 
     def _init_session(self):
-        """Visit Vinted homepage to obtain session cookies."""
         if self._is_blocked():
             remaining = int(self._blocked_until - time.time())
-            print(f"⏸️  Session init skipped — still blocked ({remaining}s remaining).")
+            print(f"Session init skipped — still blocked ({remaining}s remaining).")
             return
 
-        print("🔄 Initializing session...")
+        print("Initializing session...")
         self.session.cookies.clear()
         self._rotate_profile()
         self._apply_headers()
 
         try:
-            self._throttle()
+            self._throttle(MIN_API_DELAY)
             resp = self.session.get(VINTED_BASE_URL, timeout=15)
             self._last_request_time = time.time()
 
@@ -253,56 +222,38 @@ class VintedScraper:
             resp.raise_for_status()
             self._api_call_count = 0
             self._update_vudt_header()
-            print(f"✅ Session initialized (got {len(self.session.cookies)} cookies)")
+            print(f"Session initialized (got {len(self.session.cookies)} cookies)")
         except requests.RequestException as e:
-            print(f"⚠️  Session init warning: {e}")
-            print("   Will attempt API calls anyway...")
+            print(f"Session init warning: {e}")
+            print("Will attempt API calls anyway...")
 
     def _maybe_refresh_session(self):
-        """Refresh session cookies every SESSION_REFRESH_INTERVAL API calls."""
         self._api_call_count += 1
         if self._api_call_count >= SESSION_REFRESH_INTERVAL:
             if self._is_blocked():
                 remaining = int(self._blocked_until - time.time())
-                print(f"⏸️  Session refresh skipped — still blocked ({remaining}s remaining).")
+                print(f"Session refresh skipped — still blocked ({remaining}s remaining).")
                 return
-            print(f"🔁 Refreshing session after {self._api_call_count} API calls...")
+            print(f"Refreshing session after {self._api_call_count} API calls...")
             self._init_session()
 
     # ── Search ────────────────────────────────────────────────────────────────
 
-    def search(self, query: str, page: int = 1, catalog_id: int = None,
+    def search(self, query: str, page: int = 1, catalog_ids: list = None,
                order: str = DEFAULT_ORDER, price_from: float = None,
-               price_to: float = None, brand_ids: list = None,
-               size_ids: list = None, color_ids: list = None,
-               material_ids: list = None, status_ids: list = None,
+               price_to: float = None, per_page: int = CATALOG_PER_PAGE,
                search_session_id: str = None) -> dict:
         """
-        Search Vinted catalog for items.
+        Search Vinted catalog for items (title/price/etc only — no description).
 
-        Args:
-            query: Search text
-            page: Page number (1-indexed)
-            catalog_id: Optional category ID (e.g. 2994 for Elektronika)
-            order: Sort order ('relevance' or 'newest_first')
-            price_from: Minimum price filter
-            price_to: Maximum price filter
-            brand_ids: List of brand IDs to filter by
-            size_ids: List of size IDs to filter by
-            color_ids: List of color IDs to filter by
-            material_ids: List of material IDs to filter by
-            status_ids: List of item condition/status IDs to filter by
-
-        Returns:
-            API response as dict, or empty dict on failure
+        Returns the raw API response as dict, or {} on failure.
         """
         if self._is_blocked():
             remaining = int(self._blocked_until - time.time())
-            print(f"⏸️  Search skipped — still blocked ({remaining}s remaining).")
+            print(f"Search skipped — still blocked ({remaining}s remaining).")
             return {}
 
         url = f"{VINTED_API_URL}/catalog/items"
-        # Use list of tuples to support repeated keys (e.g. brand_ids[]=1&brand_ids[]=2)
         if search_session_id is None:
             search_session_id = str(uuid.uuid4())
         params = [
@@ -310,362 +261,139 @@ class VintedScraper:
             ("currency", DEFAULT_CURRENCY),
             ("order", order),
             ("page", page),
-            ("per_page", DEFAULT_PER_PAGE),
+            ("per_page", per_page),
             ("search_session_id", search_session_id),
             ("screen_name", "catalog"),
             ("column_count", 2),
         ]
 
-        if catalog_id is not None:
-            params.append(("catalog_ids", catalog_id))
+        for cid in (catalog_ids or []):
+            params.append(("catalog_ids", cid))
         if price_from is not None:
             params.append(("price_from", price_from))
         if price_to is not None:
             params.append(("price_to", price_to))
-        for bid in (brand_ids or []):
-            params.append(("brand_ids[]", bid))
-        for sid in (size_ids or []):
-            params.append(("size_ids[]", sid))
-        for cid in (color_ids or []):
-            params.append(("color_ids[]", cid))
-        for mid in (material_ids or []):
-            params.append(("material_ids[]", mid))
-        for stid in (status_ids or []):
-            params.append(("status_ids[]", stid))
-
-        extras = []
-        if catalog_id:
-            extras.append(f"catalog: {catalog_id}")
-        if price_from is not None or price_to is not None:
-            price_range = f"{price_from or '∞'}–{price_to or '∞'}"
-            extras.append(f"price: {price_range}")
-        if brand_ids:
-            extras.append(f"brands: {brand_ids}")
-        if size_ids:
-            extras.append(f"sizes: {size_ids}")
-        if color_ids:
-            extras.append(f"colors: {color_ids}")
-        if material_ids:
-            extras.append(f"materials: {material_ids}")
-        if status_ids:
-            extras.append(f"conditions: {status_ids}")
-        extra_str = f", {', '.join(extras)}" if extras else ""
-        print(f"🔍 Searching for: \"{query}\" (page {page}{extra_str}, order: {order})...")
 
         try:
             self._maybe_refresh_session()
 
-            # Bail out if _maybe_refresh_session triggered a block
             if self._is_blocked():
                 remaining = int(self._blocked_until - time.time())
-                print(f"⏸️  Search skipped — blocked during session refresh ({remaining}s remaining).")
+                print(f"Search skipped — blocked during session refresh ({remaining}s remaining).")
                 return {}
 
-            self._throttle()
+            self._throttle(MIN_API_DELAY)
             resp = self.session.get(url, params=params, timeout=15)
             self._last_request_time = time.time()
 
             if resp.status_code == 403:
-                print("🚫 403 Forbidden on search — entering block cooldown.")
+                print("403 Forbidden on search — entering block cooldown.")
                 self._set_blocked()
                 return {}
 
             if resp.status_code == 401:
-                print("🔒 401 Unauthorized — refreshing session and retrying...")
+                print("401 Unauthorized — refreshing session and retrying...")
                 self._init_session()
                 if self._is_blocked():
                     return {}
-                self._throttle()
+                self._throttle(MIN_API_DELAY)
                 resp = self.session.get(url, params=params, timeout=15)
                 self._last_request_time = time.time()
 
             resp.raise_for_status()
             return resp.json()
         except requests.RequestException as e:
-            print(f"❌ Search request failed: {e}")
+            print(f"Search request failed: {e}")
             if hasattr(e, "response") and e.response is not None:
-                status = e.response.status_code
-                print(f"   Status: {status}")
-                print(f"   Body: {e.response.text[:500]}")
-                if status == 403:
+                if e.response.status_code == 403:
                     self._set_blocked()
             return {}
 
-    def display_items(self, items: list, header: str = None):
-        """Display a list of items in a readable format."""
-        if not items:
-            print("\n😕 No items found.")
-            return
+    # ── Item description ─────────────────────────────────────────────────────
 
-        if header:
-            print(f"\n{'=' * 80}")
-            print(f"  {header}")
-            print(f"{'=' * 80}\n")
-
-        for i, item in enumerate(items, 1):
-            item_id = item.get("id", "?")
-            title = item.get("title", "No title")
-            price_info = item.get("price", {})
-            price = f"{price_info.get('amount', '?')} {price_info.get('currency_code', '')}"
-            total_price_info = item.get("total_item_price", {})
-            total_price = (
-                f"{total_price_info.get('amount', '?')} {total_price_info.get('currency_code', '')}"
-                if total_price_info
-                else "N/A"
-            )
-            url = item.get("url", "")
-            status = item.get("status", "")
-            brand = item.get("brand_title", "")
-            favs = item.get("favourite_count", 0)
-
-            print(f"  [{i}] {title}")
-            print(f"      💰 Price: {price}  (Total incl. fees: {total_price})")
-            if brand:
-                print(f"      🏷️  Brand: {brand}")
-            if status:
-                print(f"      📦 Status: {status}")
-            print(f"      ❤️  Favourites: {favs}")
-            print(f"      🆔 ID: {item_id}")
-            print(f"      🔗 {url}")
-            print()
-
-    def display_results(self, data: dict):
-        """Display search results with pagination info."""
-        items = data.get("items", [])
-        pagination = data.get("pagination", {})
-        total = pagination.get("total_entries", 0)
-        current_page = pagination.get("current_page", 1)
-        total_pages = pagination.get("total_pages", 1)
-        self.display_items(items, f"Found {total} item(s)  —  Page {current_page}/{total_pages}")
-
-    # ── State management ──────────────────────────────────────────────
-
-    @staticmethod
-    def _load_state() -> dict:
-        """Load monitor state from JSON file."""
-        try:
-            with open(STATE_FILE, "r") as f:
-                return json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            return {}
-
-    @staticmethod
-    def _save_state(state: dict):
-        """Save monitor state to JSON file."""
-        with open(STATE_FILE, "w") as f:
-            json.dump(state, f, indent=2)
-
-    @staticmethod
-    def _state_key(query: str, catalog_id: int = None,
-                   price_from: float = None, price_to: float = None) -> str:
-        """Generate a unique state key for a query + filters combo."""
-        key = query.lower().strip()
-        if catalog_id is not None:
-            key += f"__cat{catalog_id}"
-        if price_from is not None:
-            key += f"__pf{price_from}"
-        if price_to is not None:
-            key += f"__pt{price_to}"
-        return key
-
-    # ── Monitor mode ──────────────────────────────────────────────────
-
-    def check_new_items(self, query: str, catalog_id: int = None,
-                        price_from: float = None, price_to: float = None) -> list:
+    def get_item_description(self, item_id: int, item_url: str) -> str | None:
         """
-        Fetch items sorted by newest_first, return only items newer than last check.
+        Fetch an item's full description by scraping its public page.
 
-        First run (no last_seen_id): fetches only page 1 to establish baseline.
-        Subsequent runs: paginates through results until hitting the last seen
-        item ID or running out of pages.
+        Vinted embeds a JSON-LD `Product` block in every item page with the
+        full description text. Returns "" if the item has no description,
+        or None if the page couldn't be fetched (blocked, removed, network
+        error) — callers should treat None as "unknown", not "empty".
+
+        Results are cached in-memory per scraper instance since a
+        description doesn't change between requests within one search.
         """
-        state = self._load_state()
-        key = self._state_key(query, catalog_id, price_from=price_from, price_to=price_to)
-        last_seen_id = state.get(key, {}).get("last_seen_id")
-        is_first_run = last_seen_id is None
+        if item_id in self._description_cache:
+            return self._description_cache[item_id]
 
-        new_items = []
-        seen_ids = set()
-        page = 1
-        newest_id_this_run = None
-        search_session_id = str(uuid.uuid4())  # stable across pages of the same search
-
-        while True:
-            data = self.search(query, page=page, catalog_id=catalog_id,
-                               order="newest_first", price_from=price_from,
-                               price_to=price_to, search_session_id=search_session_id)
-            items = data.get("items", [])
-            pagination = data.get("pagination", {})
-            total_pages = pagination.get("total_pages", 1)
-
-            if not items:
-                break
-
-            # Track the highest item ID seen across all pages
-            page_max_id = max((item.get("id") for item in items if item.get("id") is not None), default=None)
-            if page_max_id is not None and (newest_id_this_run is None or page_max_id > newest_id_this_run):
-                newest_id_this_run = page_max_id
-
-            # First run: just grab page 1 to record the newest ID — no need to paginate
-            if is_first_run:
-                new_items.extend(items)
-                break
-
-            # Subsequent runs: collect items until we hit or pass the last seen ID
-            found_old = False
-            for item in items:
-                item_id = item.get("id")
-                if item_id is not None and item_id <= last_seen_id:
-                    found_old = True
-                    break
-                if item_id not in seen_ids:
-                    seen_ids.add(item_id)
-                    new_items.append(item)
-
-            if found_old or page >= total_pages:
-                break
-
-            # Small random delay between paginated requests
-            delay = random.uniform(1.0, 3.0)
-            print(f"   ⏳ Waiting {delay:.1f}s before next page...")
-            time.sleep(delay)
-            page += 1
-
-        # Update state with the newest item ID
-        if newest_id_this_run is not None:
-            state[key] = {
-                "last_seen_id": newest_id_this_run,
-                "last_checked": datetime.now().isoformat(),
-                "query": query,
-                "catalog_id": catalog_id,
-                "price_from": price_from,
-                "price_to": price_to,
-            }
-            self._save_state(state)
-
-        return new_items
-
-    def monitor(self, query: str, catalog_id: int = None, interval: int = POLL_INTERVAL,
-                price_from: float = None, price_to: float = None):
-        """
-        Continuously monitor for new items, polling at the given interval.
-
-        First run: shows all current items and saves state.
-        Subsequent runs: shows only new items since last check.
-        """
-        state = self._load_state()
-        key = self._state_key(query, catalog_id, price_from=price_from, price_to=price_to)
-        is_first_run = key not in state
-
-        extras = []
-        if catalog_id:
-            extras.append(f"catalog: {catalog_id}")
-        if price_from is not None or price_to is not None:
-            extras.append(f"price: {price_from or '∞'}–{price_to or '∞'}")
-        extra_str = f" ({', '.join(extras)})" if extras else ""
-        print(f"\n👁️  Monitor mode: \"{query}\"{extra_str}")
-        print(f"   Polling every {interval} seconds. Press Ctrl+C to stop.\n")
-
-        if is_first_run:
-            print("📋 First run — fetching current items to establish baseline...\n")
+        if self._is_blocked() or not item_url:
+            return None
 
         try:
-            while True:
-                now = datetime.now().strftime("%H:%M:%S")
-                print(f"⏰ [{now}] Checking for new items...")
+            self._throttle(MIN_DETAIL_DELAY)
+            resp = self.session.get(item_url, timeout=15)
+            self._last_request_time = time.time()
 
-                new_items = self.check_new_items(query, catalog_id,
-                                                price_from=price_from, price_to=price_to)
+            if resp.status_code == 403:
+                print("403 Forbidden on item page — entering block cooldown.")
+                self._set_blocked()
+                return None
+            if resp.status_code == 404:
+                self._cache_description(item_id, "")
+                return ""
 
-                if is_first_run:
-                    self.display_items(
-                        new_items,
-                        f"Baseline: {len(new_items)} current item(s) — will notify on new ones"
-                    )
-                    is_first_run = False
-                elif new_items:
-                    self.display_items(
-                        new_items,
-                        f"🆕 {len(new_items)} NEW item(s) found!"
-                    )
-                    self.notify_new_items(new_items, query)
-                else:
-                    print("   No new items.\n")
-
-                # Add ±20% jitter to the interval
-                jitter = random.uniform(-0.2, 0.2) * interval
-                actual_sleep = max(10, interval + jitter)
-                print(f"💤 Sleeping {actual_sleep:.0f}s until next check...\n")
-                time.sleep(actual_sleep)
-
-        except KeyboardInterrupt:
-            print("\n\n👋 Monitor stopped.")
-
-    # ── Notifications ─────────────────────────────────────────────────
-
-    def _notify_n8n(self, item: dict, query: str):
-        """Send a single item to the configured n8n webhook as JSON."""
-        if not N8N_WEBHOOK_URL:
-            print("   ⚠️  n8n notification enabled but N8N_WEBHOOK_URL is not set — skipping.")
-            return
-        payload = {
-            "item": item,
-            "query": query,
-            "found_at": datetime.now().isoformat(),
-        }
-        try:
-            resp = requests.post(N8N_WEBHOOK_URL, json=payload, timeout=10)
             resp.raise_for_status()
-            print(f"   📨 n8n notified for item {item.get('id')} ✓")
+            description = self._extract_description(resp.text) or ""
+            self._cache_description(item_id, description)
+            return description
         except requests.RequestException as e:
-            print(f"   ❌ n8n notification failed for item {item.get('id')}: {e}")
+            print(f"Item page fetch failed for {item_id}: {e}")
+            return None
 
-    def notify_new_items(self, items: list, query: str):
-        """Dispatch new-item notifications to all enabled channels."""
-        if not items:
-            return
+    def _cache_description(self, item_id: int, description: str):
+        if len(self._description_cache) >= DESCRIPTION_CACHE_SIZE:
+            self._description_cache.clear()
+        self._description_cache[item_id] = description
 
-        if NOTIFY_N8N_ENABLED:
-            for item in items:
-                self._notify_n8n(item, query)
-
-    # ── Simple search ─────────────────────────────────────────────────
-
-    def run(self, query: str = DEFAULT_SEARCH_QUERY, catalog_id: int = None,
-            price_from: float = None, price_to: float = None):
-        """Run a single search and display results."""
-        data = self.search(query, catalog_id=catalog_id,
-                           price_from=price_from, price_to=price_to)
-        if data:
-            self.display_results(data)
-        else:
-            print("\n❌ Failed to fetch results. The API might require additional auth.")
-            print("   Try again in a moment — Vinted may rate-limit requests.")
+    @staticmethod
+    def _extract_description(html: str) -> str:
+        """Pull `description` out of the item page's JSON-LD Product block."""
+        idx = html.find(_LD_JSON_TAG)
+        if idx == -1:
+            return ""
+        start = idx + len(_LD_JSON_TAG)
+        end = html.find("</script>", start)
+        if end == -1:
+            return ""
+        blob = html[start:end]
+        try:
+            data = json.loads(blob)
+        except json.JSONDecodeError:
+            return ""
+        return data.get("description", "") if isinstance(data, dict) else ""
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Search & monitor Vinted for items")
-    parser.add_argument("query", nargs="?", default=DEFAULT_SEARCH_QUERY, help="Search query")
-    parser.add_argument("--catalog", type=int, default=DEFAULT_CATALOG_ID,
-                        help="Category ID (e.g. 2994 for Elektronika)")
-    parser.add_argument("--price-from", type=float, default=DEFAULT_PRICE_FROM,
-                        help="Minimum price filter")
-    parser.add_argument("--price-to", type=float, default=DEFAULT_PRICE_TO,
-                        help="Maximum price filter")
-    parser.add_argument("--monitor", action="store_true",
-                        help="Monitor mode: poll for new items periodically")
-    parser.add_argument("--interval", type=int, default=POLL_INTERVAL,
-                        help=f"Poll interval in seconds (default: {POLL_INTERVAL})")
+    parser = argparse.ArgumentParser(description="Search Vinted and print matching titles")
+    parser.add_argument("query", nargs="?", default="", help="Search query")
+    parser.add_argument("--catalog", type=int, default=None, help="Category ID (e.g. 2994 for Elektronika)")
+    parser.add_argument("--price-from", type=float, default=None)
+    parser.add_argument("--price-to", type=float, default=None)
     args = parser.parse_args()
 
     scraper = VintedScraper()
-
-    if args.monitor:
-        scraper.monitor(args.query, catalog_id=args.catalog, interval=args.interval,
-                        price_from=args.price_from, price_to=args.price_to)
-    else:
-        scraper.run(args.query, catalog_id=args.catalog,
-                    price_from=args.price_from, price_to=args.price_to)
+    data = scraper.search(
+        args.query,
+        catalog_ids=[args.catalog] if args.catalog else None,
+        price_from=args.price_from,
+        price_to=args.price_to,
+    )
+    items = data.get("items", [])
+    print(f"\nFound {len(items)} item(s):\n")
+    for item in items:
+        price = item.get("price") or {}
+        print(f"  [{item.get('id')}] {item.get('title')} — {price.get('amount')} {price.get('currency_code')}")
+        print(f"      {item.get('url')}")
 
 
 if __name__ == "__main__":
