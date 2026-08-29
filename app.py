@@ -130,6 +130,11 @@ def run_search(
                 blocked = True
             break
 
+        # First pass: resolve what title alone can settle, and collect the
+        # rest to fetch. Descriptions for a whole page are then fetched
+        # concurrently (bounded by DETAIL_CONCURRENCY) instead of one at a
+        # time — that's what keeps a search from taking minutes.
+        needs_fetch = []  # (item, title) pairs
         for item in items:
             if scanned >= max_scan or len(results) >= max_results:
                 break
@@ -139,19 +144,22 @@ def run_search(
             verdict = title_satisfies(title, include_terms, exclude_terms)
             if verdict is True:
                 results.append(build_result(item, description=None))
-                continue
-            if verdict is False:
-                continue
+            elif verdict is None:
+                needs_fetch.append((item, title))
 
-            # Inconclusive from title alone — fetch the description.
-            description = scraper.get_item_description(item.get("id"), item.get("url", ""))
-            fetched += 1
-            if description is None:
-                # Couldn't verify (blocked / removed / network error) — skip rather
-                # than guess, so results never silently show a non-match.
-                continue
-            if full_satisfies(title, description, include_terms, exclude_terms):
-                results.append(build_result(item, description=description))
+        if needs_fetch and len(results) < max_results:
+            descriptions = scraper.get_item_descriptions(
+                [(item.get("id"), item.get("url", "")) for item, _ in needs_fetch]
+            )
+            fetched += len(needs_fetch)
+            for item, title in needs_fetch:
+                description = descriptions.get(item.get("id"))
+                if description is None:
+                    # Couldn't verify (blocked / removed / network error) — skip
+                    # rather than guess, so results never silently show a non-match.
+                    continue
+                if full_satisfies(title, description, include_terms, exclude_terms):
+                    results.append(build_result(item, description=description))
 
         pagination = data.get("pagination", {})
         total_pages = pagination.get("total_pages", 1)

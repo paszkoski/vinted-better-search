@@ -14,13 +14,13 @@ Usage (CLI, for manual testing):
     python scraper.py "xreal beam pro" --catalog 2994
 """
 
-import re
 import json
 import time
 import uuid
 import random
 import secrets
 import argparse
+import threading
 import requests
 
 from config import (
@@ -32,7 +32,8 @@ from config import (
     SESSION_REFRESH_INTERVAL,
     BLOCK_WAIT_SECONDS,
     MIN_API_DELAY,
-    MIN_DETAIL_DELAY,
+    DETAIL_CONCURRENCY,
+    DETAIL_JITTER_SECONDS,
     VINTED_PROXY,
     DESCRIPTION_CACHE_SIZE,
 )
@@ -100,6 +101,10 @@ class VintedScraper:
         self._proxy_blocked = False
         # In-memory description cache: item_id -> description (or "" if none/unavailable)
         self._description_cache: dict[int, str] = {}
+        self._cache_lock = threading.Lock()
+        self._block_lock = threading.Lock()
+        # Bounds how many item-description fetches run in flight at once
+        self._detail_semaphore = threading.Semaphore(DETAIL_CONCURRENCY)
         self._apply_headers()
         self._init_session()
 
@@ -164,6 +169,10 @@ class VintedScraper:
             print("Switching to direct connection (no proxy)")
 
     def _set_blocked(self):
+        with self._block_lock:
+            self._set_blocked_locked()
+
+    def _set_blocked_locked(self):
         if VINTED_PROXY:
             if self._use_proxy:
                 self._proxy_blocked = True
@@ -322,38 +331,69 @@ class VintedScraper:
 
         Results are cached in-memory per scraper instance since a
         description doesn't change between requests within one search.
+
+        Blocks (via a semaphore) so at most DETAIL_CONCURRENCY calls are
+        in flight at once — call this from multiple threads to fetch a
+        batch of descriptions in parallel instead of one at a time.
         """
-        if item_id in self._description_cache:
-            return self._description_cache[item_id]
+        cached = self._get_cached_description(item_id)
+        if cached is not None:
+            return cached
 
         if self._is_blocked() or not item_url:
             return None
 
-        try:
-            self._throttle(MIN_DETAIL_DELAY)
-            resp = self.session.get(item_url, timeout=15)
-            self._last_request_time = time.time()
-
-            if resp.status_code == 403:
-                print("403 Forbidden on item page — entering block cooldown.")
-                self._set_blocked()
+        with self._detail_semaphore:
+            # Re-check after possibly waiting for a free slot.
+            if self._is_blocked():
                 return None
-            if resp.status_code == 404:
-                self._cache_description(item_id, "")
-                return ""
+            try:
+                time.sleep(random.uniform(0.0, DETAIL_JITTER_SECONDS))
+                resp = self.session.get(item_url, timeout=15)
 
-            resp.raise_for_status()
-            description = self._extract_description(resp.text) or ""
-            self._cache_description(item_id, description)
-            return description
-        except requests.RequestException as e:
-            print(f"Item page fetch failed for {item_id}: {e}")
-            return None
+                if resp.status_code == 403:
+                    print("403 Forbidden on item page — entering block cooldown.")
+                    self._set_blocked()
+                    return None
+                if resp.status_code == 404:
+                    self._cache_description(item_id, "")
+                    return ""
+
+                resp.raise_for_status()
+                description = self._extract_description(resp.text) or ""
+                self._cache_description(item_id, description)
+                return description
+            except requests.RequestException as e:
+                print(f"Item page fetch failed for {item_id}: {e}")
+                return None
+
+    def get_item_descriptions(self, items: list[tuple[int, str]]) -> dict[int, str | None]:
+        """Fetch descriptions for multiple (item_id, item_url) pairs concurrently."""
+        results: dict[int, str | None] = {}
+        if not items:
+            return results
+
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=DETAIL_CONCURRENCY) as pool:
+            futures = {
+                pool.submit(self.get_item_description, item_id, item_url): item_id
+                for item_id, item_url in items
+            }
+            for future in futures:
+                item_id = futures[future]
+                results[item_id] = future.result()
+        return results
+
+    def _get_cached_description(self, item_id: int) -> str | None:
+        with self._cache_lock:
+            return self._description_cache.get(item_id)
 
     def _cache_description(self, item_id: int, description: str):
-        if len(self._description_cache) >= DESCRIPTION_CACHE_SIZE:
-            self._description_cache.clear()
-        self._description_cache[item_id] = description
+        with self._cache_lock:
+            if len(self._description_cache) >= DESCRIPTION_CACHE_SIZE:
+                self._description_cache.clear()
+            self._description_cache[item_id] = description
 
     @staticmethod
     def _extract_description(html: str) -> str:

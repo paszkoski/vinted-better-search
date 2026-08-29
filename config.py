@@ -11,8 +11,15 @@ CATALOG_PER_PAGE = 96  # Vinted's server-side max for catalog/items
 
 BLOCK_WAIT_SECONDS = int(os.environ.get("BLOCK_WAIT_SECONDS", 1800))  # 30 min default
 MIN_API_DELAY = float(os.environ.get("MIN_API_DELAY", 1.5))           # seconds between catalog search requests
-MIN_DETAIL_DELAY = float(os.environ.get("MIN_DETAIL_DELAY", 0.6))     # seconds between item-detail page fetches
 VINTED_PROXY = os.environ.get("VINTED_PROXY", "")                     # proxy in host:port format (optional)
+
+# Item-description fetches (one per candidate that title alone can't resolve)
+# run concurrently instead of one-at-a-time — each is a ~1-2MB page fetch, so
+# doing them sequentially at MIN_API_DELAY spacing is what makes a search feel
+# stuck. DETAIL_CONCURRENCY bounds how many run in flight at once; each still
+# gets a small random jitter before it fires so they don't all launch at once.
+DETAIL_CONCURRENCY = int(os.environ.get("DETAIL_CONCURRENCY", 5))
+DETAIL_JITTER_SECONDS = float(os.environ.get("DETAIL_JITTER_SECONDS", 0.3))
 
 SESSION_REFRESH_INTERVAL = 50  # refresh session every N API calls
 

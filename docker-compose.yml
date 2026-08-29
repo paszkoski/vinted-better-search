@@ -15,7 +15,8 @@ services:
       - PORT                   # web port inside container (optional, default 5000)
       - BLOCK_WAIT_SECONDS     # seconds to pause after a 403 block (optional, default 1800 = 30 min)
       - MIN_API_DELAY          # minimum seconds between catalog search requests (optional, default 1.5)
-      - MIN_DETAIL_DELAY       # minimum seconds between item-description fetches (optional, default 0.6)
+      - DETAIL_CONCURRENCY     # parallel item-description fetches (optional, default 5)
+      - DETAIL_JITTER_SECONDS  # random jitter before each description fetch (optional, default 0.3)
       - VINTED_PROXY           # proxy in host:port format, e.g. 1.2.3.4:8080 (optional)
     restart: unless-stopped
     healthcheck:
