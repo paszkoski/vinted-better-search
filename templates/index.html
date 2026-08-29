@@ -59,10 +59,13 @@
           <div class="form-text">Comma-separated. Items containing any of these in the title or description are dropped, even if they match your keywords.</div>
         </div>
 
-        <div class="col-md-3">
-          <label class="form-label">Category ID(s)</label>
-          <input type="text" id="catalog_ids" class="form-control" placeholder="e.g. 2994">
-          <div class="form-text">Comma-separated. Find it in a Vinted category URL.</div>
+        <div class="col-md-4 position-relative">
+          <label class="form-label">Category</label>
+          <input type="text" id="category_search" class="form-control" autocomplete="off"
+                 placeholder="Search categories… e.g. graphics cards">
+          <div id="categorySuggestions" class="list-group position-absolute w-100 shadow-sm"
+               style="z-index:1000; max-height:280px; overflow-y:auto; display:none;"></div>
+          <div id="categoryChips" class="d-flex flex-wrap gap-1 mt-2"></div>
         </div>
         <div class="col-md-2">
           <label class="form-label">Price from</label>
@@ -72,7 +75,7 @@
           <label class="form-label">Price to</label>
           <input type="number" step="0.01" min="0" id="price_to" class="form-control" placeholder="any">
         </div>
-        <div class="col-md-3">
+        <div class="col-md-2">
           <label class="form-label">Sort candidates by</label>
           <select id="order" class="form-select">
             <option value="relevance" selected>Relevance</option>
@@ -186,6 +189,74 @@
     return `<div class="row row-cols-2 row-cols-sm-3 row-cols-md-4 row-cols-lg-5 row-cols-xl-6 g-3">${cards}</div>`;
   }
 
+  // ── Category picker ───────────────────────────────────────────────────────
+  let ALL_CATEGORIES = [];
+  const selectedCategories = new Map(); // id -> path
+
+  async function loadCategories() {
+    try {
+      const res = await fetch('/api/categories');
+      const data = await res.json();
+      if (data.ok) ALL_CATEGORIES = data.categories;
+    } catch (_) { /* picker just won't offer suggestions; raw IDs still work */ }
+  }
+
+  function renderCategoryChips() {
+    const el = document.getElementById('categoryChips');
+    el.innerHTML = Array.from(selectedCategories.entries()).map(([id, path]) => `
+      <span class="badge bg-primary-subtle text-primary-emphasis border d-inline-flex align-items-center gap-1" style="font-size:.75rem">
+        ${escHtml(path)}
+        <i class="bi bi-x-lg" role="button" style="cursor:pointer" onclick="removeCategory(${id})"></i>
+      </span>`).join('');
+  }
+
+  function removeCategory(id) {
+    selectedCategories.delete(id);
+    renderCategoryChips();
+  }
+
+  function renderCategorySuggestions(matches) {
+    const box = document.getElementById('categorySuggestions');
+    if (!matches.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
+    box.innerHTML = matches.slice(0, 30).map(c => `
+      <button type="button" class="list-group-item list-group-item-action py-1"
+              style="font-size:.85rem" onclick="pickCategory(${c.id})">${escHtml(c.path)}</button>
+    `).join('');
+    box.style.display = 'block';
+  }
+
+  function pickCategory(id) {
+    const cat = ALL_CATEGORIES.find(c => c.id === id);
+    if (!cat) return;
+    selectedCategories.set(cat.id, cat.path);
+    renderCategoryChips();
+    const input = document.getElementById('category_search');
+    input.value = '';
+    document.getElementById('categorySuggestions').style.display = 'none';
+    input.focus();
+  }
+
+  document.getElementById('category_search').addEventListener('input', (e) => {
+    const term = e.target.value.trim().toLowerCase();
+    if (!term) { renderCategorySuggestions([]); return; }
+    const matches = ALL_CATEGORIES.filter(c => c.path.toLowerCase().includes(term));
+    renderCategorySuggestions(matches);
+  });
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('#category_search, #categorySuggestions')) {
+      document.getElementById('categorySuggestions').style.display = 'none';
+    }
+  });
+
+  function resolveCatalogIds() {
+    if (selectedCategories.size > 0) {
+      return Array.from(selectedCategories.keys()).join(',');
+    }
+    // Power-user fallback: typed raw ID(s) without picking from the list.
+    const raw = document.getElementById('category_search').value.trim();
+    return /^\d+(,\s*\d+)*$/.test(raw) ? raw : '';
+  }
+
   async function runSearch() {
     const q = document.getElementById('q').value.trim();
     if (!q) {
@@ -195,7 +266,7 @@
     const params = new URLSearchParams({
       q,
       exclude: document.getElementById('exclude').value.trim(),
-      catalog_ids: document.getElementById('catalog_ids').value.trim(),
+      catalog_ids: resolveCatalogIds(),
       price_from: document.getElementById('price_from').value.trim(),
       price_to: document.getElementById('price_to').value.trim(),
       order: document.getElementById('order').value,
@@ -250,9 +321,18 @@
   }
 
   document.getElementById('searchBtn').addEventListener('click', runSearch);
-  document.querySelectorAll('#searchForm input').forEach(el => {
+  document.querySelectorAll('#searchForm input:not(#category_search)').forEach(el => {
     el.addEventListener('keydown', e => { if (e.key === 'Enter') runSearch(); });
   });
+  document.getElementById('category_search').addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    const term = e.target.value.trim().toLowerCase();
+    const match = term ? ALL_CATEGORIES.find(c => c.path.toLowerCase().includes(term)) : null;
+    if (match) pickCategory(match.id);
+  });
+
+  loadCategories();
 </script>
 </body>
 </html>

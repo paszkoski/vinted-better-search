@@ -10,6 +10,7 @@ from flask import Flask, render_template, request, jsonify
 
 from scraper import VintedScraper
 from matcher import parse_keywords, title_satisfies, full_satisfies
+from categories import get_categories
 from config import (
     DEFAULT_ORDER,
     DEFAULT_MAX_RESULTS,
@@ -185,6 +186,15 @@ def index():
     return render_template("index.html", proxy_configured=bool(VINTED_PROXY))
 
 
+@app.route("/api/categories")
+def api_categories():
+    try:
+        return jsonify({"ok": True, "categories": get_categories()})
+    except Exception as e:
+        print(f"[Categories] Fetch failed: {e}", flush=True)
+        return jsonify({"ok": False, "error": "Couldn't fetch categories from Vinted."}), 502
+
+
 @app.route("/api/search")
 def api_search():
     include_terms = parse_keywords(request.args.get("q", ""))
@@ -277,9 +287,18 @@ def health():
     return jsonify({"status": "ok"})
 
 
+def _warm_categories():
+    try:
+        cats = get_categories()
+        print(f"[Categories] Loaded {len(cats)} categories.", flush=True)
+    except Exception as e:
+        print(f"[Categories] Warm-up fetch failed (will retry on first request): {e}", flush=True)
+
+
 if __name__ == "__main__":
     print(f"[App] Vinted Better Search starting on port {PORT}", flush=True)
     print(f"[App] Proxy: {'configured (' + VINTED_PROXY + ')' if VINTED_PROXY else 'not configured'}", flush=True)
+    threading.Thread(target=_warm_categories, daemon=True).start()
     # threaded=True so /health and a long-running /api/search don't block each other;
     # _search_lock still serializes actual searches against the shared scraper.
     app.run(host="0.0.0.0", port=PORT, debug=False, threaded=True)

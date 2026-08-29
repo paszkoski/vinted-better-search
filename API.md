@@ -1,5 +1,25 @@
 # Vinted Better Search — API
 
+## Categories
+
+```
+GET /api/categories
+```
+
+Returns Vinted's full category tree, flattened, for the category picker.
+
+```json
+{
+  "ok": true,
+  "categories": [
+    { "id": 1904, "title": "Kobiety", "path": "Kobiety" },
+    { "id": 3602, "title": "Karty graficzne", "path": "Elektronika › Komputery › Części i podzespoły komputerowe › Karty graficzne" }
+  ]
+}
+```
+
+Fetched from Vinted's homepage (no documented `/catalogs` API endpoint exists) and cached in-memory for 24h.
+
 ## Search
 
 ```
