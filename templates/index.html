@@ -30,6 +30,9 @@
       <i class="bi bi-search-heart me-2 text-primary"></i>Vinted Better Search
     </a>
     <div class="ms-auto d-flex align-items-center gap-2">
+      <button id="updateBtn" type="button" class="btn btn-sm btn-warning" style="display:none" title="Pull latest code from GitHub and restart">
+        <i class="bi bi-arrow-repeat me-1"></i>Update available
+      </button>
       {% if proxy_configured %}
         <span class="badge bg-success"><i class="bi bi-shield-lock me-1"></i>Proxy configured</span>
       {% endif %}
@@ -334,6 +337,49 @@
   });
 
   loadCategories();
+
+  // ── Auto-update check ─────────────────────────────────────────────────────
+  const updateBtn = document.getElementById('updateBtn');
+
+  async function checkVersion() {
+    try {
+      const res = await fetch('/api/version');
+      const data = await res.json();
+      updateBtn.style.display = (data.ok && data.update_available) ? 'inline-block' : 'none';
+    } catch (_) { /* GitHub unreachable — leave button as-is, retry next interval */ }
+  }
+
+  updateBtn.addEventListener('click', async () => {
+    if (!confirm('Pull the latest code from GitHub and restart the server now?')) return;
+    updateBtn.disabled = true;
+    updateBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Updating…';
+    try {
+      const res = await fetch('/api/update', { method: 'POST' });
+      const data = await res.json();
+      if (!data.ok) {
+        alert('Update failed: ' + (data.error || 'unknown error'));
+        updateBtn.disabled = false;
+        updateBtn.innerHTML = '<i class="bi bi-arrow-repeat me-1"></i>Update available';
+        return;
+      }
+    } catch (_) {
+      // Request itself may fail if the process exits before responding — treat as success.
+    }
+    updateBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Restarting…';
+    waitForRestart();
+  });
+
+  function waitForRestart() {
+    const poll = setInterval(async () => {
+      try {
+        const res = await fetch('/health', { cache: 'no-store' });
+        if (res.ok) { clearInterval(poll); location.reload(); }
+      } catch (_) { /* still down, keep polling */ }
+    }, 2000);
+  }
+
+  checkVersion();
+  setInterval(checkVersion, 60000);
 </script>
 </body>
 </html>

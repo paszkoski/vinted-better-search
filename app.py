@@ -2,6 +2,7 @@
 """Vinted Better Search — a Vinted search that actually respects your keywords."""
 
 import os
+import subprocess
 import sys
 import time
 import threading
@@ -24,6 +25,8 @@ from config import (
 
 PORT = int(os.environ.get("PORT", 5000))
 VALID_ORDERS = {"relevance", "newest_first", "price_high_to_low", "price_low_to_high"}
+REPO_DIR = os.path.dirname(os.path.abspath(__file__))
+_update_lock = threading.Lock()
 
 # ── Log-to-file (set LOG_FILE env var to enable) ──────────────────────────────
 
@@ -310,6 +313,84 @@ def test_proxy():
 @app.route("/health")
 def health():
     return jsonify({"status": "ok"})
+
+
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
+
+
+def _git(*args, timeout=15):
+    return subprocess.run(
+        ["git", *args],
+        cwd=REPO_DIR,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def _redact(text: str) -> str:
+    return text.replace(GITHUB_TOKEN, "***") if GITHUB_TOKEN else text
+
+
+def _remote_url() -> str:
+    """Origin URL, with the PAT injected for this call only — never written
+    to .git/config, since the repo is private and origin is plain https."""
+    url = _git("config", "--get", "remote.origin.url").stdout.strip()
+    if GITHUB_TOKEN and url.startswith("https://"):
+        return url.replace("https://", f"https://{GITHUB_TOKEN}@", 1)
+    return url
+
+
+@app.route("/api/version")
+def api_version():
+    if not GITHUB_TOKEN:
+        return jsonify({"ok": False, "error": "GITHUB_TOKEN not set — required for a private repo."}), 500
+    try:
+        branch = _git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        local = _git("rev-parse", "HEAD").stdout.strip()
+        remote_proc = _git("ls-remote", _remote_url(), branch, timeout=10)
+        remote_line = remote_proc.stdout.strip()
+        remote = remote_line.split()[0] if remote_line else None
+        if not remote:
+            return jsonify({"ok": False, "error": _redact(remote_proc.stderr.strip()) or "Couldn't reach GitHub."}), 502
+        return jsonify({
+            "ok": True,
+            "branch": branch,
+            "local": local[:7],
+            "remote": remote[:7],
+            "update_available": remote != local,
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": _redact(str(e))}), 502
+
+
+@app.route("/api/update", methods=["POST"])
+def api_update():
+    if not GITHUB_TOKEN:
+        return jsonify({"ok": False, "error": "GITHUB_TOKEN not set — required for a private repo."}), 500
+    if not _update_lock.acquire(blocking=False):
+        return jsonify({"ok": False, "error": "An update is already in progress."}), 429
+
+    try:
+        branch = _git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        pull = _git("pull", "--ff-only", _remote_url(), branch, timeout=60)
+        if pull.returncode != 0:
+            _update_lock.release()
+            return jsonify({"ok": False, "error": _redact(pull.stderr.strip()) or "git pull failed."}), 500
+    except Exception as e:
+        _update_lock.release()
+        return jsonify({"ok": False, "error": _redact(str(e))}), 500
+
+    def _restart():
+        # Give the response time to reach the browser, then exit — the
+        # container's restart policy brings the process back up on the
+        # freshly-pulled code. The lock is intentionally never released:
+        # the process is about to die.
+        time.sleep(1)
+        os._exit(0)
+
+    threading.Thread(target=_restart, daemon=True).start()
+    return jsonify({"ok": True, "message": "Updated. Restarting…"})
 
 
 def _warm_categories():

@@ -4,9 +4,10 @@ services:
     container_name: vinted-better-search
     working_dir: /app
     volumes:
-      - .:/app:ro              # source code (read-only)
+      - .:/app                 # source code (rw — auto-update runs `git pull` here)
     command: >
-      sh -c "pip install -r requirements.txt -q --no-cache-dir &&
+      sh -c "command -v git >/dev/null || (apt-get update -qq && apt-get install -y -qq --no-install-recommends git) &&
+             pip install -r requirements.txt -q --no-cache-dir &&
              python app.py"
     ports:
       - "${PORT:-5000}:5000"
@@ -18,6 +19,7 @@ services:
       - DETAIL_CONCURRENCY     # parallel item-description fetches (optional, default 5)
       - DETAIL_JITTER_SECONDS  # random jitter before each description fetch (optional, default 0.3)
       - VINTED_PROXY           # proxy in host:port format, e.g. 1.2.3.4:8080 (optional)
+      - GITHUB_TOKEN           # PAT with read-only access to this repo, for the update button (required — repo is private)
     restart: unless-stopped
     healthcheck:
       test:
