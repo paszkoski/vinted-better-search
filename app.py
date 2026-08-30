@@ -66,8 +66,14 @@ _search_lock = threading.Lock()
 # Live progress for whatever search is currently running, polled by the
 # frontend from /api/search/progress. _search_lock means at most one search
 # is ever in flight, so a single global dict is enough — no per-request key.
+# request/retry/failed counts are recomputed live from the scraper on every
+# poll (against this baseline) rather than only at each _report() call —
+# those calls span a blocking concurrent fetch of dozens of items, so a
+# stored count would sit stale for the whole batch instead of ticking as
+# individual requests complete.
 _progress_lock = threading.Lock()
 _progress: dict = {"active": False}
+_progress_baseline = {"requests": 0, "retries": 0, "failed": 0}
 
 
 def get_scraper() -> ScraperPool:
@@ -136,6 +142,7 @@ def run_search(
     requests_before = scraper.total_request_count()
     retries_before = scraper.total_retry_count()
     failed_before = scraper.total_failed_count()
+    _progress_baseline.update(requests=requests_before, retries=retries_before, failed=failed_before)
 
     def _report(**extra):
         _set_progress(
@@ -240,6 +247,7 @@ def run_search(
         "blocked": blocked,
         "elapsed_seconds": round(time.time() - started, 1),
         "requests_sent": scraper.total_request_count() - requests_before,
+        "failed_requests": scraper.total_failed_count() - failed_before,
     }
 
 
@@ -334,7 +342,13 @@ def api_search():
 @app.route("/api/search/progress")
 def api_search_progress():
     with _progress_lock:
-        return jsonify(dict(_progress))
+        snapshot = dict(_progress)
+    if snapshot.get("active"):
+        scraper = get_scraper()
+        snapshot["requests_sent"] = scraper.total_request_count() - _progress_baseline["requests"]
+        snapshot["retries"] = scraper.total_retry_count() - _progress_baseline["retries"]
+        snapshot["failed"] = scraper.total_failed_count() - _progress_baseline["failed"]
+    return jsonify(snapshot)
 
 
 @app.route("/api/test-proxy", methods=["POST"])

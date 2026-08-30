@@ -529,9 +529,8 @@
       if (p.found) bits.push(`${p.found} matched`);
       if (p.fetched) bits.push(`${p.fetched} descriptions checked`);
       if (p.to_fetch) bits.push(`${p.to_fetch} in flight`);
-      bits.push(`${p.requests_sent || 0} requests sent`);
+      bits.push(`${p.requests_sent || 0} requests sent${p.failed ? ` (${p.failed} failed)` : ''}`);
       if (p.retries) bits.push(`${p.retries} retried`);
-      if (p.failed) bits.push(`${p.failed} failed`);
       el.textContent = bits.join(' · ');
     }
 
@@ -562,7 +561,7 @@
         `${data.scanned} candidate${data.scanned === 1 ? '' : 's'} scanned`,
         `${data.fetched} description${data.fetched === 1 ? '' : 's'} checked`,
         `${data.elapsed_seconds}s`,
-        `${data.requests_sent} request${data.requests_sent === 1 ? '' : 's'} sent to Vinted`,
+        `${data.requests_sent} request${data.requests_sent === 1 ? '' : 's'} sent to Vinted${data.failed_requests ? ` (${data.failed_requests} failed)` : ''}`,
       ];
       if (data.truncated) bits.push('stopped early — raise "Max results" or narrow keywords');
       if (data.blocked) bits.push('⚠️ Vinted temporarily blocked this session — try again later');
