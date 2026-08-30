@@ -91,6 +91,7 @@ class VintedScraper:
     def __init__(self, on_blocked=None, use_proxy: bool = False):
         self.session = requests.Session()
         self._api_call_count = 0
+        self._request_count = 0  # every HTTP request actually sent to Vinted (incl. retries)
         self._blocked_until = 0.0
         self._last_request_time = 0.0
         # Stable per-instance identifiers (simulate a real device)
@@ -155,6 +156,10 @@ class VintedScraper:
         if v_udt:
             self.session.headers["X-V-Udt"] = v_udt
 
+    @property
+    def request_count(self) -> int:
+        return self._request_count
+
     # ── Block detection / cooldown ────────────────────────────────────────────
 
     def _is_blocked(self) -> bool:
@@ -203,6 +208,7 @@ class VintedScraper:
         try:
             self._throttle(MIN_API_DELAY)
             resp = self.session.get(VINTED_BASE_URL, timeout=15)
+            self._request_count += 1
             self._last_request_time = time.time()
 
             if resp.status_code == 403:
@@ -274,6 +280,7 @@ class VintedScraper:
 
             self._throttle(MIN_API_DELAY)
             resp = self.session.get(url, params=params, timeout=15)
+            self._request_count += 1
             self._last_request_time = time.time()
 
             if resp.status_code == 403:
@@ -288,6 +295,7 @@ class VintedScraper:
                     return {}
                 self._throttle(MIN_API_DELAY)
                 resp = self.session.get(url, params=params, timeout=15)
+                self._request_count += 1
                 self._last_request_time = time.time()
 
             resp.raise_for_status()
@@ -314,6 +322,7 @@ class VintedScraper:
         """
         for attempt in range(max_attempts):
             resp = self.session.get(url, timeout=15)
+            self._request_count += 1
             if resp.status_code != 429:
                 return resp
             if attempt == max_attempts - 1:
@@ -537,6 +546,12 @@ class ScraperPool:
 
     def get_user_countries(self, user_ids: list[int]) -> dict[int, dict | None]:
         return self._fan_out(user_ids, lambda identity, batch: identity.get_user_countries(batch))
+
+    def total_request_count(self) -> int:
+        """Sum of every HTTP request sent to Vinted across all identities so
+        far (lifetime, not per-search — callers wanting a per-search count
+        should snapshot this before and after)."""
+        return sum(identity.request_count for identity in self._identities)
 
     def _fan_out(self, work_items: list, call) -> dict:
         """Split a batch roughly evenly across identities and run each

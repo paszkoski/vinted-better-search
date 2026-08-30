@@ -62,7 +62,8 @@ GET /api/search
   "fetched": 41,
   "truncated": false,
   "blocked": false,
-  "elapsed_seconds": 38.2
+  "elapsed_seconds": 38.2,
+  "requests_sent": 47
 }
 ```
 
@@ -72,6 +73,7 @@ GET /api/search
 - `fetched` — how many of those needed a description fetch (title alone wasn't conclusive).
 - `truncated` — `max_scan` was hit before `max_results` — try narrowing keywords or raising `max_scan`.
 - `blocked` — Vinted returned a 403 during this search; results may be incomplete.
+- `requests_sent` — total HTTP requests this search sent to Vinted (catalog search pages, description fetches, country lookups, including retries), summed across all identities (direct + proxy).
 
 ## Error responses
 

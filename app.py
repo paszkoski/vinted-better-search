@@ -122,6 +122,7 @@ def run_search(
     """
     scraper = get_scraper()
     started = time.time()
+    requests_before = scraper.total_request_count()
 
     results = []
     scanned = 0
@@ -205,6 +206,7 @@ def run_search(
         "truncated": scanned >= max_scan and len(results) < max_results,
         "blocked": blocked,
         "elapsed_seconds": round(time.time() - started, 1),
+        "requests_sent": scraper.total_request_count() - requests_before,
     }
 
 

@@ -531,6 +531,7 @@
         `${data.scanned} candidate${data.scanned === 1 ? '' : 's'} scanned`,
         `${data.fetched} description${data.fetched === 1 ? '' : 's'} checked`,
         `${data.elapsed_seconds}s`,
+        `${data.requests_sent} request${data.requests_sent === 1 ? '' : 's'} sent to Vinted`,
       ];
       if (data.truncated) bits.push('stopped early — raise "Max results" or narrow keywords');
       if (data.blocked) bits.push('⚠️ Vinted temporarily blocked this session — try again later');
