@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from flask import Flask, render_template, request, jsonify
 
 from scraper import VintedScraper
-from matcher import parse_keywords, title_satisfies, full_satisfies
+from matcher import parse_keyword_groups, parse_keywords, title_satisfies, full_satisfies
 from categories import get_categories
 from config import (
     DEFAULT_ORDER,
@@ -103,7 +103,7 @@ def _photo_upload_date(photo: dict) -> str | None:
 
 def run_search(
     search_text: str,
-    include_terms: list[str],
+    include_groups: list[list[str]],
     exclude_terms: list[str],
     catalog_ids: list[int],
     price_from: float | None,
@@ -114,9 +114,10 @@ def run_search(
 ) -> dict:
     """
     Scan Vinted search results and return only items where every include
-    keyword appears in the title or description, and no exclude keyword
-    does. Title-only matches skip the description fetch; everything else
-    needs one extra request per candidate item.
+    group (at least one alternative per group) appears in the title or
+    description, and no exclude keyword does. Title-only matches skip the
+    description fetch; everything else needs one extra request per
+    candidate item.
     """
     scraper = get_scraper()
     started = time.time()
@@ -158,7 +159,7 @@ def run_search(
             scanned += 1
 
             title = item.get("title", "")
-            verdict = title_satisfies(title, include_terms, exclude_terms)
+            verdict = title_satisfies(title, include_groups, exclude_terms)
             if verdict is True:
                 results.append(build_result(item, description=None))
             elif verdict is None:
@@ -175,7 +176,7 @@ def run_search(
                     # Couldn't verify (blocked / removed / network error) — skip
                     # rather than guess, so results never silently show a non-match.
                     continue
-                if full_satisfies(title, description, include_terms, exclude_terms):
+                if full_satisfies(title, description, include_groups, exclude_terms):
                     results.append(build_result(item, description=description))
 
         pagination = data.get("pagination", {})
@@ -225,10 +226,10 @@ def api_categories():
 
 @app.route("/api/search")
 def api_search():
-    include_terms = parse_keywords(request.args.get("q", ""))
+    include_groups = parse_keyword_groups(request.args.get("q", ""))
     exclude_terms = parse_keywords(request.args.get("exclude", ""))
 
-    if not include_terms:
+    if not include_groups:
         return jsonify({"ok": False, "error": "Enter at least one keyword."}), 400
 
     catalog_ids = []
@@ -268,8 +269,10 @@ def api_search():
     # Send Vinted our include keywords as the search text too — it's a much
     # better candidate pool (roughly on-topic, sorted how we asked) than
     # scanning the whole catalog ourselves. We still verify every candidate
-    # ourselves rather than trusting Vinted's match.
-    search_text = " ".join(include_terms)
+    # ourselves rather than trusting Vinted's match. One alternative per
+    # OR-group is enough here — this only shapes the candidate pool, the
+    # actual OR logic is enforced by our own matching afterwards.
+    search_text = " ".join(group[0] for group in include_groups)
 
     if not _search_lock.acquire(blocking=False):
         return jsonify({"ok": False, "error": "A search is already in progress. Try again in a moment."}), 429
@@ -277,7 +280,7 @@ def api_search():
     try:
         outcome = run_search(
             search_text=search_text,
-            include_terms=include_terms,
+            include_groups=include_groups,
             exclude_terms=exclude_terms,
             catalog_ids=catalog_ids,
             price_from=price_from,

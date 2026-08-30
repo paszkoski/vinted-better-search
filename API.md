@@ -28,7 +28,7 @@ GET /api/search
 
 | Query param    | Type   | Required | Description |
 |----------------|--------|----------|-------------|
-| `q`            | string | yes      | Comma-separated include keywords. Every keyword must appear in the item's title or description (case-insensitive substring match). |
+| `q`            | string | yes      | Comma-separated include keyword groups (AND). Each group may contain `OR`-separated alternatives, e.g. `keychron OR key chron, k3` means (keychron OR key chron) AND k3. Every group must be satisfied by the item's title or description (case-insensitive substring match). |
 | `exclude`      | string | no       | Comma-separated exclude keywords. Any match in title or description rejects the item. |
 | `catalog_ids`  | string | no       | Comma-separated Vinted category IDs. |
 | `price_from`   | float  | no       | Minimum price. |

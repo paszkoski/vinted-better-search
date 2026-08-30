@@ -275,8 +275,8 @@
       <div class="ticket-row">
         <div class="field">
           <label for="q">Keywords <span class="req">required</span></label>
-          <input type="text" id="q" placeholder="e.g. keychron, k3, wireless" autofocus>
-          <p class="hint">Comma-separated. Every keyword must appear in the item's title <strong>or</strong> description — unlike Vinted's own search, which often ignores them.</p>
+          <input type="text" id="q" placeholder="e.g. keychron OR key chron, k3, wireless" autofocus>
+          <p class="hint">Comma-separated groups (all required), each optionally with <strong>OR</strong> alternatives, e.g. "keychron OR key chron, k3". Matched against the item's title <strong>or</strong> description — unlike Vinted's own search, which often ignores them.</p>
         </div>
       </div>
 
@@ -523,7 +523,7 @@
         return;
       }
 
-      const includeTerms = q.split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+      const includeTerms = q.split(',').flatMap(s => s.split(/\s+or\s+/i)).map(s => s.trim().toLowerCase()).filter(Boolean);
       grid.innerHTML = renderResults(data.results, includeTerms);
 
       const bits = [
