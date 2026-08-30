@@ -319,7 +319,7 @@ class VintedScraper:
 
     # ── Detail-page fetch (item description / user profile) ───────────────────
 
-    def _get_with_retry(self, url: str, max_attempts: int = 3):
+    def _get_with_retry(self, url: str, max_attempts: int = 10):
         """GET a detail page, retrying with backoff on 429.
 
         A batch of DETAIL_CONCURRENCY description/profile fetches can trip
@@ -327,11 +327,18 @@ class VintedScraper:
         403-block threshold — that shows up as 429, not 403, and previously
         made the fetch (and the whole candidate item) silently give up.
         Respects `Retry-After` when Vinted sends one, otherwise backs off
-        exponentially. Returns the Response (whatever its status), or None
-        if still rate-limited after `max_attempts` tries.
+        exponentially (capped). When VINTED_PROXY is configured, retries
+        alternate the egress IP between direct and proxy (odd attempts go
+        via proxy) — this identity's own session/cookies are reused either
+        way, only the connection a retry goes out on changes — so a 429 tied
+        to one IP doesn't burn through every attempt on the same IP. Returns
+        the Response (whatever its status), or None if still rate-limited
+        after `max_attempts` tries.
         """
         for attempt in range(max_attempts):
-            resp = self.session.get(url, timeout=15)
+            via_proxy = bool(VINTED_PROXY) and attempt % 2 == 1
+            proxies = {"http": f"http://{VINTED_PROXY}", "https": f"http://{VINTED_PROXY}"} if via_proxy else {}
+            resp = self.session.get(url, timeout=15, proxies=proxies)
             self._request_count += 1
             if resp.status_code != 429:
                 return resp
@@ -343,9 +350,10 @@ class VintedScraper:
             try:
                 wait = float(retry_after)
             except (TypeError, ValueError):
-                wait = 2 ** attempt
+                wait = min(2 ** attempt, 20)
             wait += random.uniform(0.0, DETAIL_JITTER_SECONDS)
-            print(f"429 Too Many Requests on {url} — retrying in {wait:.1f}s "
+            mode = "proxy" if via_proxy else "direct"
+            print(f"429 Too Many Requests on {url} via {mode} — retrying in {wait:.1f}s "
                   f"(attempt {attempt + 2}/{max_attempts})")
             time.sleep(wait)
         return None
