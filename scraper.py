@@ -92,6 +92,8 @@ class VintedScraper:
         self.session = requests.Session()
         self._api_call_count = 0
         self._request_count = 0  # every HTTP request actually sent to Vinted (incl. retries)
+        self._retry_count = 0    # 429 retries attempted
+        self._failed_count = 0   # detail fetches that gave up (rate-limited, blocked, network error)
         self._blocked_until = 0.0
         self._last_request_time = 0.0
         # Stable per-instance identifiers (simulate a real device)
@@ -159,6 +161,14 @@ class VintedScraper:
     @property
     def request_count(self) -> int:
         return self._request_count
+
+    @property
+    def retry_count(self) -> int:
+        return self._retry_count
+
+    @property
+    def failed_count(self) -> int:
+        return self._failed_count
 
     # ── Block detection / cooldown ────────────────────────────────────────────
 
@@ -326,7 +336,9 @@ class VintedScraper:
             if resp.status_code != 429:
                 return resp
             if attempt == max_attempts - 1:
+                self._failed_count += 1
                 return None
+            self._retry_count += 1
             retry_after = resp.headers.get("Retry-After")
             try:
                 wait = float(retry_after)
@@ -377,6 +389,7 @@ class VintedScraper:
                 if resp.status_code == 403:
                     print("403 Forbidden on item page — entering block cooldown.")
                     self._set_blocked()
+                    self._failed_count += 1
                     return None
                 if resp.status_code == 404:
                     self._cache_description(item_id, "")
@@ -388,6 +401,7 @@ class VintedScraper:
                 return description
             except requests.RequestException as e:
                 print(f"Item page fetch failed for {item_id}: {e}")
+                self._failed_count += 1
                 return None
 
     def get_item_descriptions(self, items: list[tuple[int, str]]) -> dict[int, str | None]:
@@ -469,6 +483,7 @@ class VintedScraper:
                 if resp.status_code == 403:
                     print("403 Forbidden on user profile — entering block cooldown.")
                     self._set_blocked()
+                    self._failed_count += 1
                     return None
                 if resp.status_code == 404:
                     self._cache_country(user_id, None)
@@ -483,6 +498,7 @@ class VintedScraper:
                 return country
             except requests.RequestException as e:
                 print(f"User profile fetch failed for {user_id}: {e}")
+                self._failed_count += 1
                 return None
 
     def get_user_countries(self, user_ids: list[int]) -> dict[int, dict | None]:
@@ -552,6 +568,14 @@ class ScraperPool:
         far (lifetime, not per-search — callers wanting a per-search count
         should snapshot this before and after)."""
         return sum(identity.request_count for identity in self._identities)
+
+    def total_retry_count(self) -> int:
+        """Sum of 429 retries attempted across all identities (lifetime)."""
+        return sum(identity.retry_count for identity in self._identities)
+
+    def total_failed_count(self) -> int:
+        """Sum of detail fetches that gave up across all identities (lifetime)."""
+        return sum(identity.failed_count for identity in self._identities)
 
     def _fan_out(self, work_items: list, call) -> dict:
         """Split a batch roughly evenly across identities and run each

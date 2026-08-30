@@ -63,6 +63,12 @@ _scraper: ScraperPool | None = None
 _scraper_lock = threading.Lock()
 _search_lock = threading.Lock()
 
+# Live progress for whatever search is currently running, polled by the
+# frontend from /api/search/progress. _search_lock means at most one search
+# is ever in flight, so a single global dict is enough — no per-request key.
+_progress_lock = threading.Lock()
+_progress: dict = {"active": False}
+
 
 def get_scraper() -> ScraperPool:
     global _scraper
@@ -70,6 +76,11 @@ def get_scraper() -> ScraperPool:
         if _scraper is None:
             _scraper = ScraperPool()
         return _scraper
+
+
+def _set_progress(**kwargs):
+    with _progress_lock:
+        _progress.update(kwargs)
 
 
 def build_result(item: dict, description: str | None) -> dict:
@@ -123,6 +134,16 @@ def run_search(
     scraper = get_scraper()
     started = time.time()
     requests_before = scraper.total_request_count()
+    retries_before = scraper.total_retry_count()
+    failed_before = scraper.total_failed_count()
+
+    def _report(**extra):
+        _set_progress(
+            requests_sent=scraper.total_request_count() - requests_before,
+            retries=scraper.total_retry_count() - retries_before,
+            failed=scraper.total_failed_count() - failed_before,
+            **extra,
+        )
 
     results = []
     scanned = 0
@@ -132,72 +153,84 @@ def run_search(
     search_session_id = None
     blocked = False
 
-    while len(results) < max_results and scanned < max_scan and page <= max_pages:
-        data = scraper.search(
-            search_text,
-            page=page,
-            catalog_ids=catalog_ids or None,
-            order=order,
-            price_from=price_from,
-            price_to=price_to,
-            per_page=CATALOG_PER_PAGE,
-            search_session_id=search_session_id,
-        )
-        search_session_id = data.get("search_session_id") or search_session_id
-        items = data.get("items", [])
-        if not items:
-            if not data:
-                blocked = True
-            break
+    _set_progress(active=True, phase="searching", page=0, scanned=0, found=0,
+                   fetched=0, to_fetch=0, requests_sent=0, retries=0, failed=0)
 
-        # First pass: resolve what title alone can settle, and collect the
-        # rest to fetch. Descriptions for a whole page are then fetched
-        # concurrently (bounded by DETAIL_CONCURRENCY) instead of one at a
-        # time — that's what keeps a search from taking minutes.
-        needs_fetch = []  # (item, title) pairs
-        for item in items:
-            if scanned >= max_scan or len(results) >= max_results:
-                break
-            scanned += 1
-
-            title = item.get("title", "")
-            verdict = title_satisfies(title, include_groups, exclude_terms)
-            if verdict is True:
-                results.append(build_result(item, description=None))
-            elif verdict is None:
-                needs_fetch.append((item, title))
-
-        if needs_fetch and len(results) < max_results:
-            descriptions = scraper.get_item_descriptions(
-                [(item.get("id"), item.get("url", "")) for item, _ in needs_fetch]
+    try:
+        while len(results) < max_results and scanned < max_scan and page <= max_pages:
+            _report(phase="searching", page=page)
+            data = scraper.search(
+                search_text,
+                page=page,
+                catalog_ids=catalog_ids or None,
+                order=order,
+                price_from=price_from,
+                price_to=price_to,
+                per_page=CATALOG_PER_PAGE,
+                search_session_id=search_session_id,
             )
-            fetched += len(needs_fetch)
-            for item, title in needs_fetch:
-                description = descriptions.get(item.get("id"))
-                if description is None:
-                    # Couldn't verify (blocked / removed / network error) — skip
-                    # rather than guess, so results never silently show a non-match.
-                    continue
-                if full_satisfies(title, description, include_groups, exclude_terms):
-                    results.append(build_result(item, description=description))
+            search_session_id = data.get("search_session_id") or search_session_id
+            items = data.get("items", [])
+            if not items:
+                if not data:
+                    blocked = True
+                break
 
-        pagination = data.get("pagination", {})
-        total_pages = pagination.get("total_pages", 1)
-        if page >= total_pages:
-            break
-        page += 1
+            # First pass: resolve what title alone can settle, and collect the
+            # rest to fetch. Descriptions for a whole page are then fetched
+            # concurrently (bounded by DETAIL_CONCURRENCY) instead of one at a
+            # time — that's what keeps a search from taking minutes.
+            needs_fetch = []  # (item, title) pairs
+            for item in items:
+                if scanned >= max_scan or len(results) >= max_results:
+                    break
+                scanned += 1
 
-    # Country needs a per-seller profile fetch — only worth doing for the
-    # items actually being shown, not every candidate that got scanned.
-    seller_ids = [r["seller_id"] for r in results if r["seller_id"]]
-    if seller_ids:
-        countries = scraper.get_user_countries(seller_ids)
+                title = item.get("title", "")
+                verdict = title_satisfies(title, include_groups, exclude_terms)
+                if verdict is True:
+                    results.append(build_result(item, description=None))
+                elif verdict is None:
+                    needs_fetch.append((item, title))
+
+            _report(phase="searching", scanned=scanned, found=len(results))
+
+            if needs_fetch and len(results) < max_results:
+                _report(phase="checking descriptions", to_fetch=len(needs_fetch))
+                descriptions = scraper.get_item_descriptions(
+                    [(item.get("id"), item.get("url", "")) for item, _ in needs_fetch]
+                )
+                fetched += len(needs_fetch)
+                for item, title in needs_fetch:
+                    description = descriptions.get(item.get("id"))
+                    if description is None:
+                        # Couldn't verify (blocked / removed / network error) — skip
+                        # rather than guess, so results never silently show a non-match.
+                        continue
+                    if full_satisfies(title, description, include_groups, exclude_terms):
+                        results.append(build_result(item, description=description))
+                _report(phase="searching", fetched=fetched, found=len(results), to_fetch=0)
+
+            pagination = data.get("pagination", {})
+            total_pages = pagination.get("total_pages", 1)
+            if page >= total_pages:
+                break
+            page += 1
+
+        # Country needs a per-seller profile fetch — only worth doing for the
+        # items actually being shown, not every candidate that got scanned.
+        seller_ids = [r["seller_id"] for r in results if r["seller_id"]]
+        if seller_ids:
+            _report(phase="resolving seller countries", to_fetch=len(seller_ids))
+            countries = scraper.get_user_countries(seller_ids)
+            for r in results:
+                country = countries.get(r["seller_id"])
+                if country:
+                    r["country"] = country.get("title") or country.get("code")
         for r in results:
-            country = countries.get(r["seller_id"])
-            if country:
-                r["country"] = country.get("title") or country.get("code")
-    for r in results:
-        r.pop("seller_id", None)
+            r.pop("seller_id", None)
+    finally:
+        _report(active=False, phase="done", to_fetch=0)
 
     return {
         "results": results,
@@ -296,6 +329,12 @@ def api_search():
         _search_lock.release()
 
     return jsonify({"ok": True, **outcome})
+
+
+@app.route("/api/search/progress")
+def api_search_progress():
+    with _progress_lock:
+        return jsonify(dict(_progress))
 
 
 @app.route("/api/test-proxy", methods=["POST"])

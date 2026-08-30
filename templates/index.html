@@ -508,8 +508,39 @@
     stats.textContent = '';
     grid.innerHTML = `<div class="state">
         <span class="spin spin-dark" style="width:22px;height:22px;margin-bottom:.6rem"></span>
-        <p>Scanning candidates and checking descriptions…</p>
+        <p id="searchProgress">Starting search…</p>
       </div>`;
+
+    const PHASE_LABELS = {
+      searching: 'Scanning candidates',
+      'checking descriptions': 'Checking descriptions',
+      'resolving seller countries': 'Resolving seller countries',
+      done: 'Wrapping up…',
+    };
+
+    const progressEl = () => document.getElementById('searchProgress');
+
+    function renderProgress(p) {
+      const el = progressEl();
+      if (!el || !p || !p.active) return;
+      const bits = [PHASE_LABELS[p.phase] || 'Working…'];
+      if (p.page) bits.push(`page ${p.page}`);
+      if (p.scanned) bits.push(`${p.scanned} scanned`);
+      if (p.found) bits.push(`${p.found} matched`);
+      if (p.fetched) bits.push(`${p.fetched} descriptions checked`);
+      if (p.to_fetch) bits.push(`${p.to_fetch} in flight`);
+      bits.push(`${p.requests_sent || 0} requests sent`);
+      if (p.retries) bits.push(`${p.retries} retried`);
+      if (p.failed) bits.push(`${p.failed} failed`);
+      el.textContent = bits.join(' · ');
+    }
+
+    const progressTimer = setInterval(async () => {
+      try {
+        const r = await fetch('/api/search/progress', { cache: 'no-store' });
+        renderProgress(await r.json());
+      } catch (e) { /* ignore — next tick retries */ }
+    }, 500);
 
     try {
       const res = await fetch('/api/search?' + params.toString());
@@ -542,6 +573,7 @@
           <p>Request failed. Is the server running?</p>
         </div>`;
     } finally {
+      clearInterval(progressTimer);
       btn.disabled = false;
       btn.innerHTML = '<i class="bi bi-search"></i> Run search';
     }
