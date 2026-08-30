@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 
 from flask import Flask, render_template, request, jsonify
 
-from scraper import VintedScraper
+from scraper import ScraperPool
 from matcher import parse_keyword_groups, parse_keywords, title_satisfies, full_satisfies
 from categories import get_categories
 from config import (
@@ -54,20 +54,21 @@ if LOG_FILE:
 
 app = Flask(__name__)
 
-# A single shared scraper keeps session cookies warm across searches.
-# Searches are serialized (one at a time) so concurrent requests can't
-# interleave on the shared HTTP session / throttle state or double the
-# request rate Vinted sees from this instance.
-_scraper: VintedScraper | None = None
+# A single shared scraper pool keeps session cookies warm across searches
+# (one identity per connection — direct, plus proxy when VINTED_PROXY is
+# set). Searches are serialized (one at a time) so concurrent requests
+# can't interleave on the shared HTTP sessions / throttle state or double
+# the request rate Vinted sees from this instance.
+_scraper: ScraperPool | None = None
 _scraper_lock = threading.Lock()
 _search_lock = threading.Lock()
 
 
-def get_scraper() -> VintedScraper:
+def get_scraper() -> ScraperPool:
     global _scraper
     with _scraper_lock:
         if _scraper is None:
-            _scraper = VintedScraper()
+            _scraper = ScraperPool()
         return _scraper
 
 
