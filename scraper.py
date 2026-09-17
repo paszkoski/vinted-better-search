@@ -615,20 +615,26 @@ class ScraperPool:
     def _fan_out(self, work_items: list, call) -> dict:
         """Split a batch roughly evenly across identities and run each
         identity's share concurrently — a big batch spends half its
-        requests on each IP instead of all of them on one."""
+        requests on each IP instead of all of them on one.
+
+        Skips any identity currently in a block cooldown — otherwise its
+        share of the batch would just silently fail item by item (each
+        item's own `_is_blocked()` guard returns None instantly) instead
+        of going to the identity that's actually able to serve it."""
         if not work_items:
             return {}
-        if len(self._identities) == 1:
-            return call(self._identities[0], work_items)
+        identities = [i for i in self._identities if not i._is_blocked()] or self._identities
+        if len(identities) == 1:
+            return call(identities[0], work_items)
 
-        buckets = [[] for _ in self._identities]
+        buckets = [[] for _ in identities]
         for i, item in enumerate(work_items):
-            buckets[i % len(self._identities)].append(item)
+            buckets[i % len(identities)].append(item)
 
         results = {}
-        with ThreadPoolExecutor(max_workers=len(self._identities)) as pool:
+        with ThreadPoolExecutor(max_workers=len(identities)) as pool:
             futures = [pool.submit(call, identity, batch)
-                       for identity, batch in zip(self._identities, buckets) if batch]
+                       for identity, batch in zip(identities, buckets) if batch]
             for future in futures:
                 results.update(future.result())
         return results
