@@ -21,6 +21,7 @@ from config import (
     MAX_MAX_SCAN,
     CATALOG_PER_PAGE,
     VINTED_PROXY,
+    VINTED_BASE_URL,
 )
 
 PORT = int(os.environ.get("PORT", 5000))
@@ -89,6 +90,15 @@ def _set_progress(**kwargs):
         _progress.update(kwargs)
 
 
+def _item_url(item: dict) -> str:
+    """Vinted's search API now returns a host-relative item path
+    (e.g. "/items/123-foo") instead of a full URL."""
+    url = item.get("url", "")
+    if url and url.startswith("/"):
+        url = VINTED_BASE_URL + url
+    return url
+
+
 def build_result(item: dict, description: str | None) -> dict:
     price = item.get("price") or {}
     photo = item.get("photo") or {}
@@ -98,7 +108,7 @@ def build_result(item: dict, description: str | None) -> dict:
         "description": description or "",
         "price": price.get("amount"),
         "currency": price.get("currency_code", ""),
-        "url": item.get("url", ""),
+        "url": _item_url(item),
         "image_url": photo.get("url", ""),
         "brand": item.get("brand_title", ""),
         "size": item.get("size_title", ""),
@@ -176,7 +186,10 @@ def run_search(
                 per_page=CATALOG_PER_PAGE,
                 search_session_id=search_session_id,
             )
-            search_session_id = data.get("search_session_id") or search_session_id
+            search_session_id = (
+                (data.get("search_tracking_params") or {}).get("search_session_id")
+                or search_session_id
+            )
             items = data.get("items", [])
             if not items:
                 if not data:
@@ -205,7 +218,7 @@ def run_search(
             if needs_fetch and len(results) < max_results:
                 _report(phase="checking descriptions", to_fetch=len(needs_fetch))
                 descriptions = scraper.get_item_descriptions(
-                    [(item.get("id"), item.get("url", "")) for item, _ in needs_fetch]
+                    [(item.get("id"), _item_url(item)) for item, _ in needs_fetch]
                 )
                 fetched += len(needs_fetch)
                 for item, title in needs_fetch:

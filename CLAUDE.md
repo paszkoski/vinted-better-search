@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Vinted Better Search — a Flask app that wraps Vinted's search API with strict, literal
 keyword matching against title *and* description. Vinted's own search is fuzzy and
-frequently ignores the words a user types (and its `catalog/items` API doesn't return
+frequently ignores the words a user types (and its `svc-catalogue/items` API doesn't return
 descriptions at all), so this app re-verifies every candidate itself.
 
 ## Running
@@ -45,7 +45,8 @@ Four modules, each with one job:
   blocks obvious bot traffic with a 403. Handles session refresh, request throttling, 403
   block cooldown (with optional proxy toggling — alternates proxy/direct on each block), and
   per-instance in-memory caches for item descriptions and seller countries. `search()` hits
-  `catalog/items` (titles only, no description). `get_item_description()` fetches an item's
+  `svc-catalogue/items` on the `api.` host (titles only, no description; item URLs it returns
+  are host-relative, so callers must prefix `VINTED_BASE_URL`). `get_item_description()` fetches an item's
   public page and pulls the description out of the JSON-LD `Product` block Vinted embeds
   there — this is the only way to get description text. Both description and country
   fetches have `_concurrent` batch variants bounded by `DETAIL_CONCURRENCY` via a semaphore,

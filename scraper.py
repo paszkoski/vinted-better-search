@@ -27,6 +27,7 @@ from concurrent.futures import ThreadPoolExecutor
 from config import (
     VINTED_BASE_URL,
     VINTED_API_URL,
+    VINTED_CATALOG_URL,
     DEFAULT_CURRENCY,
     DEFAULT_ORDER,
     CATALOG_PER_PAGE,
@@ -259,7 +260,7 @@ class VintedScraper:
             print(f"Search skipped — still blocked ({remaining}s remaining).")
             return {}
 
-        url = f"{VINTED_API_URL}/catalog/items"
+        url = f"{VINTED_CATALOG_URL}/items"
         if search_session_id is None:
             search_session_id = str(uuid.uuid4())
         params = [

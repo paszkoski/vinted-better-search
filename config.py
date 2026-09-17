@@ -4,6 +4,9 @@ import os
 # Vinted domain to search (use your country's domain)
 VINTED_BASE_URL = os.environ.get("VINTED_BASE_URL", "https://www.vinted.pl")
 VINTED_API_URL = f"{VINTED_BASE_URL}/api/v2"
+# Catalog search moved off /api/v2 to its own "api." host + service path
+# (Vinted migrated it server-side; see scraper.py's search()).
+VINTED_CATALOG_URL = "https://api." + VINTED_BASE_URL.split("://", 1)[1].removeprefix("www.") + "/svc-catalogue"
 
 DEFAULT_CURRENCY = "PLN"
 DEFAULT_ORDER = "price_low_to_high"
