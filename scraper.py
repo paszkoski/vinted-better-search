@@ -202,6 +202,7 @@ class VintedScraper:
             if not vpn.rotate(reason=f"403 on {url} (attempt {attempt}/{VPN_MAX_ROTATE_ATTEMPTS})"):
                 return None
             self._blocked_until = 0.0  # rotation succeeded — lift this identity's cooldown
+            self._close_stale_connections()
             self._throttle(MIN_API_DELAY)
             try:
                 resp = self.session.get(url, timeout=15, **kwargs)
@@ -219,6 +220,18 @@ class VintedScraper:
                 return resp
             print(f"Still 403 after rotating (attempt {attempt}/{VPN_MAX_ROTATE_ATTEMPTS}) on {url}")
         return None
+
+    def _close_stale_connections(self):
+        """Discard pooled keep-alive connections after a VPN rotation — they
+        were opened over the old egress IP and are now dead. Without this,
+        a request can pull another already-dead connection back out of the
+        pool instead of opening a fresh one, causing repeated
+        RemoteDisconnected errors across several retries even though the
+        rotation itself succeeded."""
+        try:
+            self.session.close()
+        except Exception as e:
+            print(f"Closing stale connections failed: {e}")
 
     # ── Request throttling ────────────────────────────────────────────────────
 
@@ -422,7 +435,8 @@ class VintedScraper:
                 self._failed_count += 1
                 return None
             self._retry_count += 1
-            vpn.rotate(reason=f"429 on {url} (attempt {attempt + 1}/{max_attempts})")
+            if vpn.rotate(reason=f"429 on {url} (attempt {attempt + 1}/{max_attempts})"):
+                self._close_stale_connections()
             retry_after = resp.headers.get("Retry-After")
             try:
                 wait = float(retry_after)
