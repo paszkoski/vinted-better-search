@@ -3,8 +3,12 @@ services:
     build: .
     container_name: vinted-better-search
     working_dir: /app
-    volumes:
-      - .:/app                 # source code (rw — auto-update runs `git pull` here)
+    # No source bind mount — the image's `COPY . .` (Dockerfile) already has
+    # the full repo, .git included, so /api/update's `git pull` works against
+    # the container's own filesystem. A relative `.:/app` bind mount doesn't
+    # reliably resolve to the actual repo checkout under every Portainer
+    # stack deploy method (e.g. git-repository stacks), and silently shadows
+    # the baked-in code with an empty directory when it doesn't.
     cap_add:
       - NET_ADMIN               # required for NordVPN to manage the tunnel interface
     devices:
