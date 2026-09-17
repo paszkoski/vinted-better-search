@@ -16,9 +16,7 @@ from categories import get_categories
 from config import (
     DEFAULT_ORDER,
     DEFAULT_MAX_RESULTS,
-    MAX_MAX_RESULTS,
     DEFAULT_MAX_SCAN,
-    MAX_MAX_SCAN,
     CATALOG_PER_PAGE,
     VINTED_BASE_URL,
 )
@@ -309,16 +307,16 @@ def api_search():
     if order not in VALID_ORDERS:
         order = DEFAULT_ORDER
 
-    def parse_int(name, default, cap):
+    def parse_int(name, default):
         raw = request.args.get(name, "").strip()
         try:
             val = int(raw) if raw else default
         except ValueError:
             val = default
-        return max(1, min(val, cap))
+        return max(1, val)
 
-    max_results = parse_int("max_results", DEFAULT_MAX_RESULTS, MAX_MAX_RESULTS)
-    max_scan = parse_int("max_scan", DEFAULT_MAX_SCAN, MAX_MAX_SCAN)
+    max_results = parse_int("max_results", DEFAULT_MAX_RESULTS)
+    max_scan = parse_int("max_scan", DEFAULT_MAX_SCAN)
     max_scan = max(max_scan, max_results)
 
     # Send Vinted our include keywords as the search text too — it's a much

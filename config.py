@@ -45,10 +45,9 @@ SESSION_REFRESH_INTERVAL = 50  # refresh session every N API calls
 # ── Deep-search bounds ───────────────────────────────────────────────────────
 # A title-only match needs no extra request. Anything else needs a per-item
 # description fetch, which is what makes this slower (but correct) than
-# Vinted's own search. These caps keep a single search request bounded.
+# Vinted's own search. These are just defaults when the caller doesn't
+# specify max_results/max_scan — no upper cap is enforced beyond that.
 DEFAULT_MAX_RESULTS = 40
-MAX_MAX_RESULTS = 100
 DEFAULT_MAX_SCAN = 200
-MAX_MAX_SCAN = 500
 
 DESCRIPTION_CACHE_SIZE = 2000
