@@ -41,6 +41,7 @@ services:
       - DETAIL_MIN_GAP_SECONDS # minimum spacing between description-fetch dispatches (optional, default 0.5)
       - DETAIL_BATCH_SIZE      # requests per batch before pausing (optional, default 29)
       - DETAIL_BATCH_COOLDOWN_SECONDS # pause between batches (optional, default 10)
+      - DETAIL_MAX_ROUNDS      # retry rounds for deferred/blocked items before giving up (optional, default 5)
       - NORDVPN_TOKEN          # NordVPN login token (required — see .env.example for how to generate one)
       - NORDVPN_COUNTRIES      # comma-separated countries to rotate between (optional, defaults to Poland,Germany,Netherlands,Czech Republic)
       - VPN_ROTATE_COOLDOWN_SECONDS  # minimum seconds between two VPN rotations (optional, default 15)
