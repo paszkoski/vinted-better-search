@@ -206,8 +206,13 @@ class VintedScraper:
             try:
                 resp = self.session.get(url, timeout=15, **kwargs)
             except requests.RequestException as e:
-                print(f"Retry after VPN rotation failed: {e}")
-                return None
+                # The session's pooled keep-alive connections were opened over
+                # the old IP — the first request after a rotation can find one
+                # already dead rather than getting a clean HTTP response. Treat
+                # that the same as a 403: rotate again and keep trying, rather
+                # than giving up on the item outright.
+                print(f"Request error after rotating (attempt {attempt}/{VPN_MAX_ROTATE_ATTEMPTS}) on {url}: {e}")
+                continue
             self._request_count += 1
             self._last_request_time = time.time()
             if resp.status_code != 403:
@@ -394,7 +399,22 @@ class VintedScraper:
         rate-limited after `max_attempts` tries.
         """
         for attempt in range(max_attempts):
-            resp = self.session.get(url, timeout=15)
+            try:
+                resp = self.session.get(url, timeout=15)
+            except requests.RequestException as e:
+                # A pooled keep-alive connection opened before a VPN rotation
+                # can come back dead rather than give a clean response — treat
+                # that as transient and retry rather than failing the item.
+                if attempt == max_attempts - 1:
+                    self._failed_count += 1
+                    print(f"Request error on {url} after {max_attempts} attempts: {e}")
+                    return None
+                self._retry_count += 1
+                wait = min(2 ** attempt, 20) + random.uniform(0.0, DETAIL_JITTER_SECONDS)
+                print(f"Request error on {url} ({e}) — retrying in {wait:.1f}s "
+                      f"(attempt {attempt + 2}/{max_attempts})")
+                time.sleep(wait)
+                continue
             self._request_count += 1
             if resp.status_code != 429:
                 return resp
