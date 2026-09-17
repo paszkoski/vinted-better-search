@@ -162,7 +162,6 @@ def run_search(
     scanned = 0
     fetched = 0
     page = 1
-    max_pages = 12
     search_session_id = None
     blocked = False
 
@@ -170,7 +169,7 @@ def run_search(
                    fetched=0, to_fetch=0, requests_sent=0, retries=0, failed=0)
 
     try:
-        while len(results) < max_results and scanned < max_scan and page <= max_pages:
+        while len(results) < max_results and scanned < max_scan:
             _report(phase="searching", page=page)
             data = scraper.search(
                 search_text,
