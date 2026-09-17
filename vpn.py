@@ -17,6 +17,7 @@ detail-fetch threads all hitting a block at once must not each trigger
 their own rotation.
 """
 
+import subprocess
 import threading
 import time
 
@@ -40,6 +41,19 @@ def _ensure_initialized_locked():
     print("NordVPN rotation initialized.")
 
 
+def _status_line() -> str:
+    """One-line summary of `nordvpn status` for the log — server/country/IP,
+    whatever the CLI reports right now."""
+    try:
+        out = subprocess.run(
+            ["nordvpn", "status"], capture_output=True, text=True, timeout=10
+        ).stdout
+        fields = [line.strip() for line in out.splitlines() if line.strip()]
+        return ", ".join(fields) if fields else "status unavailable"
+    except Exception as e:
+        return f"status unavailable ({e})"
+
+
 def rotate(reason: str = "") -> bool:
     """Move to a new NordVPN server. Returns True if this identity's IP has
     (recently) changed and the caller should retry its request, False if
@@ -58,13 +72,15 @@ def rotate(reason: str = "") -> bool:
             return False
 
         if time.time() - _last_rotation < VPN_ROTATE_COOLDOWN_SECONDS:
+            print(f"[VPN] reusing rotation from {time.time() - _last_rotation:.1f}s ago ({reason})")
             return True
 
-        print(f"Rotating VPN server ({reason})...")
+        print(f"[VPN] rotating ({reason})...")
         try:
             rotate_VPN(instructions=_instructions)
         except Exception as e:
-            print(f"VPN rotation failed: {e}")
+            print(f"[VPN] rotation failed: {e}")
             return False
         _last_rotation = time.time()
+        print(f"[VPN] rotated ({reason}) -> {_status_line()}")
         return True
