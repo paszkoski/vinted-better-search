@@ -16,6 +16,12 @@ services:
       - /dev/net/tun             # required for NordVPN's tunnel device
     sysctls:
       net.ipv4.conf.all.src_valid_mark: 1  # required by NordVPN's Linux client
+      # NordVPN toggles this on every connect/disconnect to block IPv6 leaks
+      # while tunneled. Docker only makes a sysctl writable at runtime if
+      # it's declared here — otherwise it's read-only regardless of
+      # NET_ADMIN/NET_RAW, which is what broke every connection attempt
+      # ("permission denied on key net.ipv6.conf.all.disable_ipv6").
+      net.ipv6.conf.all.disable_ipv6: 0
     ports:
       - "${PORT:-5000}:${PORT:-5000}"
     environment:
