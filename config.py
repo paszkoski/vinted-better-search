@@ -37,13 +37,16 @@ VPN_MAX_ROTATE_ATTEMPTS = int(os.environ.get("VPN_MAX_ROTATE_ATTEMPTS", 15))
 # doing them sequentially at MIN_API_DELAY spacing is what makes a search feel
 # stuck. DETAIL_CONCURRENCY bounds how many run in flight at once; each still
 # gets a small random jitter before it fires so they don't all launch at once.
-DETAIL_CONCURRENCY = int(os.environ.get("DETAIL_CONCURRENCY", 5))
+DETAIL_CONCURRENCY = int(os.environ.get("DETAIL_CONCURRENCY", 2))
 DETAIL_JITTER_SECONDS = float(os.environ.get("DETAIL_JITTER_SECONDS", 0.3))
 # Minimum spacing enforced between successive detail-fetch dispatches, on top
 # of the random jitter above — without it, DETAIL_CONCURRENCY workers can all
 # fire within the same jitter window, and Vinted's rate limit reads that
-# burst as automated and escalates straight to a 403 block.
-DETAIL_MIN_GAP_SECONDS = float(os.environ.get("DETAIL_MIN_GAP_SECONDS", 0.5))
+# burst as automated and escalates straight to a 429/403. Vinted's 429 limit
+# looks to be burst/velocity-based rather than purely per-IP (a fresh VPN
+# rotation doesn't clear it by itself), so slower/less concurrent dispatch is
+# the actual fix, not just retrying harder.
+DETAIL_MIN_GAP_SECONDS = float(os.environ.get("DETAIL_MIN_GAP_SECONDS", 2.0))
 
 SESSION_REFRESH_INTERVAL = 50  # refresh session every N API calls
 
