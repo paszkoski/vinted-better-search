@@ -38,6 +38,8 @@ from config import (
     DETAIL_CONCURRENCY,
     DETAIL_JITTER_SECONDS,
     DETAIL_MIN_GAP_SECONDS,
+    DETAIL_BATCH_SIZE,
+    DETAIL_BATCH_COOLDOWN_SECONDS,
     DESCRIPTION_CACHE_SIZE,
     VPN_MAX_ROTATE_ATTEMPTS,
 )
@@ -120,6 +122,11 @@ class VintedScraper:
         # limit almost immediately (seen escalating straight to a 403 block).
         self._detail_throttle_lock = threading.Lock()
         self._last_detail_dispatch = 0.0
+        # Counts detail-fetch dispatches toward DETAIL_BATCH_SIZE; every
+        # thread pauses together once the batch fills up (see
+        # _stagger_detail_dispatch).
+        self._detail_batch_lock = threading.Lock()
+        self._detail_batch_count = 0
         self._apply_headers()
         self._init_session()
 
@@ -243,16 +250,26 @@ class VintedScraper:
 
     def _stagger_detail_dispatch(self):
         """Space out detail-fetch dispatches by at least DETAIL_MIN_GAP_SECONDS,
-        on top of the existing random jitter.
+        on top of the existing random jitter, and pause every DETAIL_BATCH_SIZE
+        dispatches for DETAIL_BATCH_COOLDOWN_SECONDS.
 
         DETAIL_CONCURRENCY lets several detail fetches run *in flight* at
-        once, but without this, all of them fire within the same
-        DETAIL_JITTER_SECONDS window — a burst that Vinted's rate limit
-        reads as automated and escalates to a 403 block almost immediately.
-        Reserving each dispatch's earliest start time under a lock keeps
-        the concurrency (they still overlap in flight) while guaranteeing
-        real spacing between when each one actually goes out.
+        once, but without the gap/jitter, all of them fire within the same
+        instant — a burst that looks automated on its own. Separately,
+        Vinted's 429 limit on these fetches is a hard per-window request-count
+        threshold (empirically right around DETAIL_BATCH_SIZE) rather than
+        burst detection, so once the batch fills up every thread pauses
+        together — under the same lock, so nothing else dispatches mid-pause —
+        before the next batch starts.
         """
+        with self._detail_batch_lock:
+            self._detail_batch_count += 1
+            if self._detail_batch_count > DETAIL_BATCH_SIZE:
+                self._detail_batch_count = 1
+                print(f"Reached {DETAIL_BATCH_SIZE}-request detail-fetch batch — "
+                      f"pausing {DETAIL_BATCH_COOLDOWN_SECONDS:.0f}s before continuing")
+                time.sleep(DETAIL_BATCH_COOLDOWN_SECONDS)
+
         with self._detail_throttle_lock:
             now = time.time()
             earliest = max(now, self._last_detail_dispatch + DETAIL_MIN_GAP_SECONDS)
