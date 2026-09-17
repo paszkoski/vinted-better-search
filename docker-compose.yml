@@ -9,22 +9,27 @@ services:
     # reliably resolve to the actual repo checkout under every Portainer
     # stack deploy method (e.g. git-repository stacks), and silently shadows
     # the baked-in code with an empty directory when it doesn't.
-    # NET_ADMIN + NET_RAW + SYS_ADMIN still weren't enough for NordVPN to
-    # write net.ipv6.conf.all.disable_ipv6 — that sysctl (and others like
-    # it) sit under a path Docker read-only-bind-mounts in a container's own
-    # network namespace, regardless of granted capabilities (confirmed
-    # against https://github.com/docker/for-linux/issues/197). Sharing the
-    # host's network namespace instead of getting a private one sidesteps
-    # that entirely — same /proc/sys/net view as any other root process on
-    # the host, no masking involved. Narrower than `privileged` (no extra
-    # device/capability grants), but the container now binds directly to
-    # the host's own network — no port mapping, no isolation from the LAN.
-    network_mode: host
+    # NET_ADMIN + NET_RAW + SYS_ADMIN, and separately network_mode: host,
+    # all failed to let NordVPN write net.ipv6.conf.all.disable_ipv6 — turns
+    # out this isn't a capability or network-namespace issue at all. Docker
+    # read-only-masks certain /proc/sys paths via its *mount* namespace,
+    # independent of network namespace or granted capabilities (confirmed
+    # against https://github.com/docker/for-linux/issues/197). systempaths=
+    # unconfined removes just that masking — narrower than `privileged`,
+    # doesn't touch capabilities/seccomp/AppArmor, no networking tradeoffs.
+    security_opt:
+      - systempaths=unconfined
     cap_add:
       - NET_ADMIN               # required for NordVPN to manage the tunnel interface
       - NET_RAW                  # required alongside NET_ADMIN for NordVPN's nftables/routing setup
+      - SYS_ADMIN                 # some sysctl writes still need this on top of the unmasked path
     devices:
       - /dev/net/tun             # required for NordVPN's tunnel device
+    sysctls:
+      net.ipv4.conf.all.src_valid_mark: 1  # required by NordVPN's Linux client
+      net.ipv6.conf.all.disable_ipv6: 0     # initial value; NordVPN toggles it on connect/disconnect
+    ports:
+      - "${PORT:-5000}:${PORT:-5000}"
     environment:
       - PYTHONUNBUFFERED=1     # without this, scraper.py's block/retry diagnostics never reach `docker logs`
       - VINTED_BASE_URL        # e.g. https://www.vinted.de (optional, defaults to vinted.pl)
