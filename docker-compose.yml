@@ -11,6 +11,7 @@ services:
     # the baked-in code with an empty directory when it doesn't.
     cap_add:
       - NET_ADMIN               # required for NordVPN to manage the tunnel interface
+      - NET_RAW                  # required alongside NET_ADMIN for NordVPN's nftables/routing setup
     devices:
       - /dev/net/tun             # required for NordVPN's tunnel device
     sysctls:
