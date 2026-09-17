@@ -12,9 +12,20 @@ DEFAULT_CURRENCY = "PLN"
 DEFAULT_ORDER = "price_low_to_high"
 CATALOG_PER_PAGE = 96  # Vinted's server-side max for catalog/items
 
-BLOCK_WAIT_SECONDS = int(os.environ.get("BLOCK_WAIT_SECONDS", 1800))  # 30 min default
+BLOCK_WAIT_SECONDS = int(os.environ.get("BLOCK_WAIT_SECONDS", 1800))  # 30 min default — fallback cooldown
+                                                                        # only used when a VPN rotation attempt
+                                                                        # itself fails (see vpn.py)
 MIN_API_DELAY = float(os.environ.get("MIN_API_DELAY", 1.5))           # seconds between catalog search requests
-VINTED_PROXY = os.environ.get("VINTED_PROXY", "")                     # proxy in host:port format (optional)
+
+# NordVPN countries to rotate between on a block (comma-separated, must match
+# nordvpn_switcher's bundled country list, e.g. "Poland,Germany,Netherlands").
+# Empty = rotate across every available NordVPN server ("complete rotation"),
+# which depends on NordVPN's public server-list endpoint being reachable.
+NORDVPN_COUNTRIES = os.environ.get("NORDVPN_COUNTRIES", "Poland,Germany,Netherlands,Czech Republic")
+# Minimum seconds between two VPN rotations — coalesces simultaneous blocks
+# from concurrent detail-fetch threads into a single rotation instead of
+# rotating once per thread.
+VPN_ROTATE_COOLDOWN_SECONDS = float(os.environ.get("VPN_ROTATE_COOLDOWN_SECONDS", 15))
 
 # Item-description fetches (one per candidate that title alone can't resolve)
 # run concurrently instead of one-at-a-time — each is a ~1-2MB page fetch, so

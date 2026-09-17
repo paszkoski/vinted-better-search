@@ -24,6 +24,7 @@ import threading
 import requests
 from concurrent.futures import ThreadPoolExecutor
 
+import vpn
 from config import (
     VINTED_BASE_URL,
     VINTED_API_URL,
@@ -37,7 +38,6 @@ from config import (
     DETAIL_CONCURRENCY,
     DETAIL_JITTER_SECONDS,
     DETAIL_MIN_GAP_SECONDS,
-    VINTED_PROXY,
     DESCRIPTION_CACHE_SIZE,
 )
 
@@ -83,14 +83,12 @@ _LD_JSON_TAG = 'application/ld+json">'
 class VintedScraper:
     """Scraper for Vinted catalog search + item descriptions.
 
-    Each instance is a single fixed identity — its own cookies, device
-    profile and throttle/block state, and either always direct or always
-    through the proxy (`use_proxy`), never both. To spread requests across
-    both a direct and a proxy connection, use `ScraperPool` instead of
-    juggling instances yourself.
+    A single identity — its own cookies, device profile and throttle/block
+    state. On a 403 block, rotates to a new NordVPN server (see vpn.py) and
+    retries the request once instead of just cooling down.
     """
 
-    def __init__(self, on_blocked=None, use_proxy: bool = False):
+    def __init__(self, on_blocked=None):
         self.session = requests.Session()
         self._api_call_count = 0
         self._request_count = 0  # every HTTP request actually sent to Vinted (incl. retries)
@@ -108,8 +106,6 @@ class VintedScraper:
         self._agent_id = str(uuid.uuid4())
         # Optional callback: on_blocked(wait_minutes: int) — called when a 403 block is detected
         self._on_blocked = on_blocked
-        # Fixed for this instance's lifetime — see class docstring
-        self._use_proxy = use_proxy and bool(VINTED_PROXY)
         # In-memory description cache: item_id -> description (or "" if none/unavailable)
         self._description_cache: dict[int, str] = {}
         # In-memory seller-country cache: user_id -> {"title": ..., "code": ...} or None
@@ -124,7 +120,6 @@ class VintedScraper:
         self._detail_throttle_lock = threading.Lock()
         self._last_detail_dispatch = 0.0
         self._apply_headers()
-        self._apply_proxy()
         self._init_session()
 
     # ── Header / profile management ───────────────────────────────────────────
@@ -182,24 +177,35 @@ class VintedScraper:
     def _is_blocked(self) -> bool:
         return time.time() < self._blocked_until
 
-    def _apply_proxy(self):
-        if self._use_proxy:
-            proxy_url = f"http://{VINTED_PROXY}"
-            self.session.proxies = {"http": proxy_url, "https": proxy_url}
-        else:
-            self.session.proxies = {}
-
     def _set_blocked(self):
         with self._block_lock:
             self._blocked_until = time.time() + BLOCK_WAIT_SECONDS
             wait_min = BLOCK_WAIT_SECONDS / 60
-            mode = "proxy" if self._use_proxy else "direct"
-            print(f"Blocked by Vinted (403) on {mode} connection! Pausing this identity for {wait_min:.1f} minutes...")
+            print(f"Blocked by Vinted (403)! Pausing for {wait_min:.1f} minutes unless a VPN rotation succeeds...")
             if self._on_blocked:
                 try:
                     self._on_blocked(wait_min)
                 except Exception as e:
                     print(f"Block notification error: {e}")
+
+    def _rotate_and_retry_get(self, url: str, **kwargs) -> requests.Response | None:
+        """Called right after a GET came back 403. Rotates to a new NordVPN
+        server and retries the same request once. Returns the retry's
+        Response, or None if rotation failed or the retry itself errored —
+        callers should treat None the same as still being blocked (the
+        BLOCK_WAIT_SECONDS cooldown `_set_blocked()` already set stands)."""
+        if not vpn.rotate(reason=f"403 on {url}"):
+            return None
+        self._blocked_until = 0.0  # rotation succeeded — lift this identity's cooldown
+        self._throttle(MIN_API_DELAY)
+        try:
+            resp = self.session.get(url, timeout=15, **kwargs)
+        except requests.RequestException as e:
+            print(f"Retry after VPN rotation failed: {e}")
+            return None
+        self._request_count += 1
+        self._last_request_time = time.time()
+        return resp
 
     # ── Request throttling ────────────────────────────────────────────────────
 
@@ -250,7 +256,12 @@ class VintedScraper:
 
             if resp.status_code == 403:
                 self._set_blocked()
-                return
+                retried = self._rotate_and_retry_get(VINTED_BASE_URL)
+                if retried is None or retried.status_code == 403:
+                    if retried is not None:
+                        self._set_blocked()
+                    return
+                resp = retried
 
             resp.raise_for_status()
             self._api_call_count = 0
@@ -321,9 +332,14 @@ class VintedScraper:
             self._last_request_time = time.time()
 
             if resp.status_code == 403:
-                print("403 Forbidden on search — entering block cooldown.")
+                print("403 Forbidden on search — rotating VPN and retrying.")
                 self._set_blocked()
-                return {}
+                retried = self._rotate_and_retry_get(url, params=params)
+                if retried is None or retried.status_code == 403:
+                    if retried is not None:
+                        self._set_blocked()
+                    return {}
+                resp = retried
 
             if resp.status_code == 401:
                 print("401 Unauthorized — refreshing session and retrying...")
@@ -339,9 +355,18 @@ class VintedScraper:
             return resp.json()
         except requests.RequestException as e:
             print(f"Search request failed: {e}")
-            if hasattr(e, "response") and e.response is not None:
-                if e.response.status_code == 403:
-                    self._set_blocked()
+            if hasattr(e, "response") and e.response is not None and e.response.status_code == 403:
+                self._set_blocked()
+                retried = self._rotate_and_retry_get(url, params=params)
+                if retried is None or retried.status_code == 403:
+                    if retried is not None:
+                        self._set_blocked()
+                    return {}
+                try:
+                    retried.raise_for_status()
+                    return retried.json()
+                except requests.RequestException:
+                    pass
             return {}
 
     # ── Detail-page fetch (item description / user profile) ───────────────────
@@ -354,18 +379,11 @@ class VintedScraper:
         403-block threshold — that shows up as 429, not 403, and previously
         made the fetch (and the whole candidate item) silently give up.
         Respects `Retry-After` when Vinted sends one, otherwise backs off
-        exponentially (capped). When VINTED_PROXY is configured, retries
-        alternate the egress IP between direct and proxy (odd attempts go
-        via proxy) — this identity's own session/cookies are reused either
-        way, only the connection a retry goes out on changes — so a 429 tied
-        to one IP doesn't burn through every attempt on the same IP. Returns
-        the Response (whatever its status), or None if still rate-limited
-        after `max_attempts` tries.
+        exponentially (capped). Returns the Response (whatever its status),
+        or None if still rate-limited after `max_attempts` tries.
         """
         for attempt in range(max_attempts):
-            via_proxy = bool(VINTED_PROXY) and attempt % 2 == 1
-            proxies = {"http": f"http://{VINTED_PROXY}", "https": f"http://{VINTED_PROXY}"} if via_proxy else {}
-            resp = self.session.get(url, timeout=15, proxies=proxies)
+            resp = self.session.get(url, timeout=15)
             self._request_count += 1
             if resp.status_code != 429:
                 return resp
@@ -379,8 +397,7 @@ class VintedScraper:
             except (TypeError, ValueError):
                 wait = min(2 ** attempt, 20)
             wait += random.uniform(0.0, DETAIL_JITTER_SECONDS)
-            mode = "proxy" if via_proxy else "direct"
-            print(f"429 Too Many Requests on {url} via {mode} — retrying in {wait:.1f}s "
+            print(f"429 Too Many Requests on {url} — retrying in {wait:.1f}s "
                   f"(attempt {attempt + 2}/{max_attempts})")
             time.sleep(wait)
         return None
@@ -422,10 +439,15 @@ class VintedScraper:
                     return None
 
                 if resp.status_code == 403:
-                    print("403 Forbidden on item page — entering block cooldown.")
+                    print("403 Forbidden on item page — rotating VPN and retrying.")
                     self._set_blocked()
-                    self._failed_count += 1
-                    return None
+                    retried = self._rotate_and_retry_get(item_url)
+                    if retried is None or retried.status_code == 403:
+                        if retried is not None:
+                            self._set_blocked()
+                        self._failed_count += 1
+                        return None
+                    resp = retried
                 if resp.status_code == 404:
                     self._cache_description(item_id, "")
                     return ""
@@ -516,10 +538,15 @@ class VintedScraper:
                     return None
 
                 if resp.status_code == 403:
-                    print("403 Forbidden on user profile — entering block cooldown.")
+                    print("403 Forbidden on user profile — rotating VPN and retrying.")
                     self._set_blocked()
-                    self._failed_count += 1
-                    return None
+                    retried = self._rotate_and_retry_get(f"{VINTED_API_URL}/users/{user_id}")
+                    if retried is None or retried.status_code == 403:
+                        if retried is not None:
+                            self._set_blocked()
+                        self._failed_count += 1
+                        return None
+                    resp = retried
                 if resp.status_code == 404:
                     self._cache_country(user_id, None)
                     return None
@@ -556,88 +583,6 @@ class VintedScraper:
     def _cache_country(self, user_id: int, country: dict | None):
         with self._cache_lock:
             self._country_cache[user_id] = country
-
-
-class ScraperPool:
-    """Pools a direct `VintedScraper` identity with a proxy one (when
-    VINTED_PROXY is configured) so requests get split across two source
-    IPs instead of concentrating on one — each identity has its own
-    cookies, device profile and throttle/block state, so a block on one
-    doesn't stop the other from serving requests. With no proxy configured
-    this is just a thin wrapper around a single direct identity.
-
-    Exposes the same interface as `VintedScraper` (`search`,
-    `get_item_descriptions`, `get_user_countries`).
-    """
-
-    def __init__(self, on_blocked=None):
-        self._identities = [VintedScraper(on_blocked=on_blocked, use_proxy=False)]
-        if VINTED_PROXY:
-            self._identities.append(VintedScraper(on_blocked=on_blocked, use_proxy=True))
-        self._rr_lock = threading.Lock()
-        self._rr_index = 0
-
-    def _next_identity(self) -> VintedScraper:
-        """Round-robin across identities, preferring one that isn't
-        currently in a block cooldown."""
-        with self._rr_lock:
-            order = [self._identities[(self._rr_index + i) % len(self._identities)]
-                      for i in range(len(self._identities))]
-            self._rr_index = (self._rr_index + 1) % len(self._identities)
-        for identity in order:
-            if not identity._is_blocked():
-                return identity
-        return order[0]
-
-    def search(self, *args, **kwargs) -> dict:
-        return self._next_identity().search(*args, **kwargs)
-
-    def get_item_descriptions(self, items: list[tuple[int, str]]) -> dict[int, str | None]:
-        return self._fan_out(items, lambda identity, batch: identity.get_item_descriptions(batch))
-
-    def get_user_countries(self, user_ids: list[int]) -> dict[int, dict | None]:
-        return self._fan_out(user_ids, lambda identity, batch: identity.get_user_countries(batch))
-
-    def total_request_count(self) -> int:
-        """Sum of every HTTP request sent to Vinted across all identities so
-        far (lifetime, not per-search — callers wanting a per-search count
-        should snapshot this before and after)."""
-        return sum(identity.request_count for identity in self._identities)
-
-    def total_retry_count(self) -> int:
-        """Sum of 429 retries attempted across all identities (lifetime)."""
-        return sum(identity.retry_count for identity in self._identities)
-
-    def total_failed_count(self) -> int:
-        """Sum of detail fetches that gave up across all identities (lifetime)."""
-        return sum(identity.failed_count for identity in self._identities)
-
-    def _fan_out(self, work_items: list, call) -> dict:
-        """Split a batch roughly evenly across identities and run each
-        identity's share concurrently — a big batch spends half its
-        requests on each IP instead of all of them on one.
-
-        Skips any identity currently in a block cooldown — otherwise its
-        share of the batch would just silently fail item by item (each
-        item's own `_is_blocked()` guard returns None instantly) instead
-        of going to the identity that's actually able to serve it."""
-        if not work_items:
-            return {}
-        identities = [i for i in self._identities if not i._is_blocked()] or self._identities
-        if len(identities) == 1:
-            return call(identities[0], work_items)
-
-        buckets = [[] for _ in identities]
-        for i, item in enumerate(work_items):
-            buckets[i % len(identities)].append(item)
-
-        results = {}
-        with ThreadPoolExecutor(max_workers=len(identities)) as pool:
-            futures = [pool.submit(call, identity, batch)
-                       for identity, batch in zip(identities, buckets) if batch]
-            for future in futures:
-                results.update(future.result())
-        return results
 
 
 def main():

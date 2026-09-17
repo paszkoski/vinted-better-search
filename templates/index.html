@@ -64,7 +64,6 @@
       padding: .4rem .65rem; border-radius: 999px; border: 1px solid transparent;
       background: none; cursor: default;
     }
-    .pill-proxy { background: rgba(46, 107, 74, .18); color: #8fd1ab; border-color: rgba(143, 209, 171, .3); }
     .pill-update {
       background: var(--rust); color: #fff; cursor: pointer; border: none;
     }
@@ -259,9 +258,6 @@
       <button id="updateBtn" type="button" class="pill pill-update" style="display:none" title="Pull latest code from GitHub and restart">
         <i class="bi bi-arrow-repeat"></i> Update available
       </button>
-      {% if proxy_configured %}
-        <span class="pill pill-proxy"><i class="bi bi-shield-lock"></i> Proxy configured</span>
-      {% endif %}
     </div>
   </div>
 </header>

@@ -1,25 +1,29 @@
 services:
   vinted-better-search:
-    image: python:3.11-slim
+    build: .
     container_name: vinted-better-search
     working_dir: /app
     volumes:
       - .:/app                 # source code (rw — auto-update runs `git pull` here)
-    command: >
-      sh -c "command -v git >/dev/null || (apt-get update -qq && apt-get install -y -qq --no-install-recommends git) &&
-             pip install -r requirements.txt -q --no-cache-dir &&
-             python -u app.py"
+    cap_add:
+      - NET_ADMIN               # required for NordVPN to manage the tunnel interface
+    devices:
+      - /dev/net/tun             # required for NordVPN's tunnel device
+    sysctls:
+      net.ipv4.conf.all.src_valid_mark: 1  # required by NordVPN's Linux client
     ports:
       - "${PORT:-5000}:5000"
     environment:
       - PYTHONUNBUFFERED=1     # without this, scraper.py's block/retry diagnostics never reach `docker logs`
       - VINTED_BASE_URL        # e.g. https://www.vinted.de (optional, defaults to vinted.pl)
       - PORT                   # web port inside container (optional, default 5000)
-      - BLOCK_WAIT_SECONDS     # seconds to pause after a 403 block (optional, default 1800 = 30 min)
+      - BLOCK_WAIT_SECONDS     # fallback cooldown if a VPN rotation itself fails (optional, default 1800 = 30 min)
       - MIN_API_DELAY          # minimum seconds between catalog search requests (optional, default 1.5)
       - DETAIL_CONCURRENCY     # parallel item-description fetches (optional, default 5)
       - DETAIL_JITTER_SECONDS  # random jitter before each description fetch (optional, default 0.3)
-      - VINTED_PROXY           # proxy in host:port format, e.g. 1.2.3.4:8080 (optional)
+      - NORDVPN_TOKEN          # NordVPN login token (required — see .env.example for how to generate one)
+      - NORDVPN_COUNTRIES      # comma-separated countries to rotate between (optional, defaults to Poland,Germany,Netherlands,Czech Republic)
+      - VPN_ROTATE_COOLDOWN_SECONDS  # minimum seconds between two VPN rotations (optional, default 15)
       - GITHUB_TOKEN           # PAT with read-only access to this repo, for the update button (required — repo is private)
     restart: unless-stopped
     healthcheck:
@@ -31,4 +35,4 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s        # give pip install time to finish on first start
+      start_period: 60s        # give nordvpnd + login time to finish on first start

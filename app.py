@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 
 from flask import Flask, render_template, request, jsonify
 
-from scraper import ScraperPool
+from scraper import VintedScraper
 from matcher import parse_keyword_groups, parse_keywords, title_satisfies, full_satisfies
 from categories import get_categories
 from config import (
@@ -20,7 +20,6 @@ from config import (
     DEFAULT_MAX_SCAN,
     MAX_MAX_SCAN,
     CATALOG_PER_PAGE,
-    VINTED_PROXY,
     VINTED_BASE_URL,
 )
 
@@ -55,12 +54,11 @@ if LOG_FILE:
 
 app = Flask(__name__)
 
-# A single shared scraper pool keeps session cookies warm across searches
-# (one identity per connection — direct, plus proxy when VINTED_PROXY is
-# set). Searches are serialized (one at a time) so concurrent requests
-# can't interleave on the shared HTTP sessions / throttle state or double
-# the request rate Vinted sees from this instance.
-_scraper: ScraperPool | None = None
+# A single shared scraper keeps session cookies warm across searches.
+# Searches are serialized (one at a time) so concurrent requests can't
+# interleave on the shared HTTP session / throttle state or double the
+# request rate Vinted sees from this instance.
+_scraper: VintedScraper | None = None
 _scraper_lock = threading.Lock()
 _search_lock = threading.Lock()
 
@@ -77,11 +75,11 @@ _progress: dict = {"active": False}
 _progress_baseline = {"requests": 0, "retries": 0, "failed": 0}
 
 
-def get_scraper() -> ScraperPool:
+def get_scraper() -> VintedScraper:
     global _scraper
     with _scraper_lock:
         if _scraper is None:
-            _scraper = ScraperPool()
+            _scraper = VintedScraper()
         return _scraper
 
 
@@ -149,16 +147,16 @@ def run_search(
     """
     scraper = get_scraper()
     started = time.time()
-    requests_before = scraper.total_request_count()
-    retries_before = scraper.total_retry_count()
-    failed_before = scraper.total_failed_count()
+    requests_before = scraper.request_count
+    retries_before = scraper.retry_count
+    failed_before = scraper.failed_count
     _progress_baseline.update(requests=requests_before, retries=retries_before, failed=failed_before)
 
     def _report(**extra):
         _set_progress(
-            requests_sent=scraper.total_request_count() - requests_before,
-            retries=scraper.total_retry_count() - retries_before,
-            failed=scraper.total_failed_count() - failed_before,
+            requests_sent=scraper.request_count - requests_before,
+            retries=scraper.retry_count - retries_before,
+            failed=scraper.failed_count - failed_before,
             **extra,
         )
 
@@ -259,8 +257,8 @@ def run_search(
         "truncated": scanned >= max_scan and len(results) < max_results,
         "blocked": blocked,
         "elapsed_seconds": round(time.time() - started, 1),
-        "requests_sent": scraper.total_request_count() - requests_before,
-        "failed_requests": scraper.total_failed_count() - failed_before,
+        "requests_sent": scraper.request_count - requests_before,
+        "failed_requests": scraper.failed_count - failed_before,
     }
 
 
@@ -269,7 +267,7 @@ def run_search(
 
 @app.route("/")
 def index():
-    return render_template("index.html", proxy_configured=bool(VINTED_PROXY))
+    return render_template("index.html")
 
 
 @app.route("/api/categories")
@@ -358,28 +356,10 @@ def api_search_progress():
         snapshot = dict(_progress)
     if snapshot.get("active"):
         scraper = get_scraper()
-        snapshot["requests_sent"] = scraper.total_request_count() - _progress_baseline["requests"]
-        snapshot["retries"] = scraper.total_retry_count() - _progress_baseline["retries"]
-        snapshot["failed"] = scraper.total_failed_count() - _progress_baseline["failed"]
+        snapshot["requests_sent"] = scraper.request_count - _progress_baseline["requests"]
+        snapshot["retries"] = scraper.retry_count - _progress_baseline["retries"]
+        snapshot["failed"] = scraper.failed_count - _progress_baseline["failed"]
     return jsonify(snapshot)
-
-
-@app.route("/api/test-proxy", methods=["POST"])
-def test_proxy():
-    if not VINTED_PROXY:
-        return jsonify({"ok": False, "error": "VINTED_PROXY env var is not set."})
-    import requests
-    from config import VINTED_BASE_URL
-    proxy_url = f"http://{VINTED_PROXY}"
-    proxies = {"http": proxy_url, "https": proxy_url}
-    try:
-        resp = requests.get(VINTED_BASE_URL, proxies=proxies, timeout=10,
-                             headers={"User-Agent": "Mozilla/5.0"})
-        if resp.status_code < 500:
-            return jsonify({"ok": True, "status_code": resp.status_code})
-        return jsonify({"ok": False, "error": f"Server returned {resp.status_code}."})
-    except requests.RequestException as e:
-        return jsonify({"ok": False, "error": str(e)})
 
 
 @app.route("/health")
@@ -475,7 +455,7 @@ def _warm_categories():
 
 if __name__ == "__main__":
     print(f"[App] Vinted Better Search starting on port {PORT}", flush=True)
-    print(f"[App] Proxy: {'configured (' + VINTED_PROXY + ')' if VINTED_PROXY else 'not configured'}", flush=True)
+    print("[App] IP-block defense: NordVPN rotation (see vpn.py)", flush=True)
     threading.Thread(target=_warm_categories, daemon=True).start()
     # threaded=True so /health and a long-running /api/search don't block each other;
     # _search_lock still serializes actual searches against the shared scraper.
