@@ -26,6 +26,11 @@ NORDVPN_COUNTRIES = os.environ.get("NORDVPN_COUNTRIES", "Poland,Germany,Netherla
 # from concurrent detail-fetch threads into a single rotation instead of
 # rotating once per thread.
 VPN_ROTATE_COOLDOWN_SECONDS = float(os.environ.get("VPN_ROTATE_COOLDOWN_SECONDS", 15))
+# How many times a single blocked request will hop to a new VPN server before
+# giving up and falling back to the BLOCK_WAIT_SECONDS cooldown. Bounded so a
+# broad block of NordVPN's IP ranges (not just one server) can't hang a
+# search forever hammering NordVPN with rotation attempts.
+VPN_MAX_ROTATE_ATTEMPTS = int(os.environ.get("VPN_MAX_ROTATE_ATTEMPTS", 15))
 
 # Item-description fetches (one per candidate that title alone can't resolve)
 # run concurrently instead of one-at-a-time — each is a ~1-2MB page fetch, so

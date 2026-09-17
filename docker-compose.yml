@@ -28,6 +28,7 @@ services:
       - NORDVPN_TOKEN          # NordVPN login token (required — see .env.example for how to generate one)
       - NORDVPN_COUNTRIES      # comma-separated countries to rotate between (optional, defaults to Poland,Germany,Netherlands,Czech Republic)
       - VPN_ROTATE_COOLDOWN_SECONDS  # minimum seconds between two VPN rotations (optional, default 15)
+      - VPN_MAX_ROTATE_ATTEMPTS # max server hops per blocked request before falling back to BLOCK_WAIT_SECONDS (optional, default 15)
       - GITHUB_TOKEN           # PAT with read-only access to this repo, for the update button (required — repo is private)
     restart: unless-stopped
     healthcheck:

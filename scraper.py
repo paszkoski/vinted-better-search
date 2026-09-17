@@ -39,6 +39,7 @@ from config import (
     DETAIL_JITTER_SECONDS,
     DETAIL_MIN_GAP_SECONDS,
     DESCRIPTION_CACHE_SIZE,
+    VPN_MAX_ROTATE_ATTEMPTS,
 )
 
 # ── Mobile app profiles (from real iOS Vinted app traffic) ────────────────────
@@ -190,22 +191,29 @@ class VintedScraper:
 
     def _rotate_and_retry_get(self, url: str, **kwargs) -> requests.Response | None:
         """Called right after a GET came back 403. Rotates to a new NordVPN
-        server and retries the same request once. Returns the retry's
-        Response, or None if rotation failed or the retry itself errored —
-        callers should treat None the same as still being blocked (the
-        BLOCK_WAIT_SECONDS cooldown `_set_blocked()` already set stands)."""
-        if not vpn.rotate(reason=f"403 on {url}"):
-            return None
-        self._blocked_until = 0.0  # rotation succeeded — lift this identity's cooldown
-        self._throttle(MIN_API_DELAY)
-        try:
-            resp = self.session.get(url, timeout=15, **kwargs)
-        except requests.RequestException as e:
-            print(f"Retry after VPN rotation failed: {e}")
-            return None
-        self._request_count += 1
-        self._last_request_time = time.time()
-        return resp
+        server and retries — if that retry is 403 too, rotates again and
+        retries again, up to VPN_MAX_ROTATE_ATTEMPTS times, so one blocked
+        server doesn't stall the rest of a search. Returns the first
+        non-403 Response, or None if rotation itself failed, the retry
+        errored, or every attempt was still 403 — callers should treat None
+        the same as still being blocked (the BLOCK_WAIT_SECONDS cooldown
+        `_set_blocked()` already set stands)."""
+        for attempt in range(1, VPN_MAX_ROTATE_ATTEMPTS + 1):
+            if not vpn.rotate(reason=f"403 on {url} (attempt {attempt}/{VPN_MAX_ROTATE_ATTEMPTS})"):
+                return None
+            self._blocked_until = 0.0  # rotation succeeded — lift this identity's cooldown
+            self._throttle(MIN_API_DELAY)
+            try:
+                resp = self.session.get(url, timeout=15, **kwargs)
+            except requests.RequestException as e:
+                print(f"Retry after VPN rotation failed: {e}")
+                return None
+            self._request_count += 1
+            self._last_request_time = time.time()
+            if resp.status_code != 403:
+                return resp
+            print(f"Still 403 after rotating (attempt {attempt}/{VPN_MAX_ROTATE_ATTEMPTS}) on {url}")
+        return None
 
     # ── Request throttling ────────────────────────────────────────────────────
 
