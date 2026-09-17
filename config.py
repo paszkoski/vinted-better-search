@@ -52,6 +52,11 @@ DETAIL_MIN_GAP_SECONDS = float(os.environ.get("DETAIL_MIN_GAP_SECONDS", 0.5))
 # next batch starts.
 DETAIL_BATCH_SIZE = int(os.environ.get("DETAIL_BATCH_SIZE", 29))
 DETAIL_BATCH_COOLDOWN_SECONDS = float(os.environ.get("DETAIL_BATCH_COOLDOWN_SECONDS", 10))
+# A blocked/rate-limited detail fetch is deferred to a later round instead of
+# retried in place — the rest of the batch keeps moving instead of stalling
+# behind one stuck item. DETAIL_MAX_ROUNDS bounds how many times the
+# still-pending set gets retried before giving up on whatever's left.
+DETAIL_MAX_ROUNDS = int(os.environ.get("DETAIL_MAX_ROUNDS", 5))
 
 SESSION_REFRESH_INTERVAL = 50  # refresh session every N API calls
 

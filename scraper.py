@@ -4,7 +4,7 @@ Vinted Scraper — search Vinted's catalog and fetch per-item descriptions.
 
 Vinted's own `catalog/items` API only returns a title for each item — no
 description — so its search silently ignores whatever the description
-contains. `get_item_description()` fetches the public item page and pulls
+contains. `get_item_descriptions()` fetches each public item page and pulls
 the description back out of the JSON-LD `<script type="application/ld+json">`
 block Vinted embeds in every item page, which is what makes real
 title-or-description keyword matching possible.
@@ -40,6 +40,7 @@ from config import (
     DETAIL_MIN_GAP_SECONDS,
     DETAIL_BATCH_SIZE,
     DETAIL_BATCH_COOLDOWN_SECONDS,
+    DETAIL_MAX_ROUNDS,
     DESCRIPTION_CACHE_SIZE,
     VPN_MAX_ROTATE_ATTEMPTS,
 )
@@ -414,131 +415,102 @@ class VintedScraper:
 
     # ── Detail-page fetch (item description / user profile) ───────────────────
 
-    def _get_with_retry(self, url: str, max_attempts: int = 10):
-        """GET a detail page, retrying with backoff on 429.
+    def _run_in_rounds(self, keyed_items: list[tuple], fetch_one) -> dict:
+        """Run fetch_one(key, payload) concurrently for each (key, payload) in
+        keyed_items. Whenever fetch_one reports it needs a retry (blocked,
+        rate-limited, or errored — anything transient), that item is deferred
+        to a later round instead of retried in place: the rest of the batch
+        keeps moving instead of stalling behind one stuck item, and by the
+        time a deferred item comes back around, a block/rate-limit has often
+        cleared (VPN rotations and batch cooldowns triggered by other items'
+        attempts happen in the meantime too). Runs up to DETAIL_MAX_ROUNDS
+        rounds; anything still pending after that is recorded as None.
 
-        A batch of DETAIL_CONCURRENCY description/profile fetches can trip
-        Vinted's per-endpoint rate limit even though it's well under the
-        403-block threshold — that shows up as 429, not 403, and previously
-        made the fetch (and the whole candidate item) silently give up.
-        Also rotates to a new VPN server before each retry — Vinted's rate
-        limit reads as tied to the source IP, so a new one plus the backoff
-        wait clears it faster than waiting alone. Respects `Retry-After`
-        when Vinted sends one, otherwise backs off exponentially (capped).
-        Returns the Response (whatever its status), or None if still
-        rate-limited after `max_attempts` tries.
+        fetch_one(key, payload) -> (value, needs_retry).
         """
-        for attempt in range(max_attempts):
-            try:
-                resp = self.session.get(url, timeout=15)
-            except requests.RequestException as e:
-                # A pooled keep-alive connection opened before a VPN rotation
-                # can come back dead rather than give a clean response — treat
-                # that as transient and retry rather than failing the item.
-                if attempt == max_attempts - 1:
-                    self._failed_count += 1
-                    print(f"Request error on {url} after {max_attempts} attempts: {e}")
-                    return None
-                self._retry_count += 1
-                wait = min(2 ** attempt, 20) + random.uniform(0.0, DETAIL_JITTER_SECONDS)
-                print(f"Request error on {url} ({e}) — retrying in {wait:.1f}s "
-                      f"(attempt {attempt + 2}/{max_attempts})")
-                time.sleep(wait)
-                continue
-            self._request_count += 1
-            if resp.status_code != 429:
-                return resp
-            if attempt == max_attempts - 1:
-                self._failed_count += 1
-                return None
-            self._retry_count += 1
-            if vpn.rotate(reason=f"429 on {url} (attempt {attempt + 1}/{max_attempts})"):
-                self._close_stale_connections()
-            retry_after = resp.headers.get("Retry-After")
-            try:
-                wait = float(retry_after)
-            except (TypeError, ValueError):
-                wait = min(2 ** attempt, 20)
-            wait += random.uniform(0.0, DETAIL_JITTER_SECONDS)
-            print(f"429 Too Many Requests on {url} — retrying in {wait:.1f}s "
-                  f"(attempt {attempt + 2}/{max_attempts})")
-            time.sleep(wait)
-        return None
+        results = {}
+        pending = keyed_items
+        for round_num in range(1, DETAIL_MAX_ROUNDS + 1):
+            if not pending:
+                break
+            if round_num > 1:
+                print(f"Retrying {len(pending)} deferred item(s) — round {round_num}/{DETAIL_MAX_ROUNDS}")
+            retry_needed = []
+            with ThreadPoolExecutor(max_workers=DETAIL_CONCURRENCY) as pool:
+                futures = {pool.submit(fetch_one, key, payload): (key, payload) for key, payload in pending}
+                for future in futures:
+                    key, payload = futures[future]
+                    value, needs_retry = future.result()
+                    if needs_retry:
+                        retry_needed.append((key, payload))
+                    else:
+                        results[key] = value
+            pending = retry_needed
+
+        for key, _ in pending:
+            self._failed_count += 1
+            results[key] = None
+        return results
 
     # ── Item description ─────────────────────────────────────────────────────
 
-    def get_item_description(self, item_id: int, item_url: str) -> str | None:
-        """
-        Fetch an item's full description by scraping its public page.
-
-        Vinted embeds a JSON-LD `Product` block in every item page with the
-        full description text. Returns "" if the item has no description,
-        or None if the page couldn't be fetched (blocked, removed, network
-        error) — callers should treat None as "unknown", not "empty".
-
-        Results are cached in-memory per scraper instance since a
-        description doesn't change between requests within one search.
-
-        Blocks (via a semaphore) so at most DETAIL_CONCURRENCY calls are
-        in flight at once — call this from multiple threads to fetch a
-        batch of descriptions in parallel instead of one at a time.
-        """
+    def _fetch_description_attempt(self, item_id: int, item_url: str) -> tuple[str | None, bool]:
+        """One attempt at an item's description. Returns (description, needs_retry):
+        description is "" if the item has no description, None if unresolved
+        (cache miss and no successful attempt yet) — callers should treat
+        None as "unknown", not "empty". needs_retry True means this item
+        should be deferred to a later round (see _run_in_rounds)."""
         cached = self._get_cached_description(item_id)
         if cached is not None:
-            return cached
-
-        if self._is_blocked() or not item_url:
-            return None
+            return cached, False
+        if not item_url:
+            return None, False
+        if self._is_blocked():
+            return None, True
 
         with self._detail_semaphore:
-            # Re-check after possibly waiting for a free slot.
             if self._is_blocked():
-                return None
+                return None, True
+            self._stagger_detail_dispatch()
             try:
-                self._stagger_detail_dispatch()
-                resp = self._get_with_retry(item_url)
-                if resp is None:
-                    print(f"Item page fetch failed for {item_id}: still rate-limited after retries")
-                    return None
-
-                if resp.status_code == 403:
-                    print("403 Forbidden on item page — rotating VPN and retrying.")
-                    self._set_blocked()
-                    retried = self._rotate_and_retry_get(item_url)
-                    if retried is None or retried.status_code == 403:
-                        if retried is not None:
-                            self._set_blocked()
-                        self._failed_count += 1
-                        return None
-                    resp = retried
-                if resp.status_code == 404:
-                    self._cache_description(item_id, "")
-                    return ""
-
-                resp.raise_for_status()
-                description = self._extract_description(resp.text) or ""
-                self._cache_description(item_id, description)
-                return description
+                resp = self.session.get(item_url, timeout=15)
             except requests.RequestException as e:
-                print(f"Item page fetch failed for {item_id}: {e}")
-                self._failed_count += 1
-                return None
+                print(f"Item page fetch error for {item_id}: {e} — deferring")
+                return None, True
+            self._request_count += 1
+
+            if resp.status_code == 429:
+                print(f"429 Too Many Requests on item {item_id} — deferring")
+                return None, True
+            if resp.status_code == 403:
+                print(f"403 Forbidden on item {item_id} — rotating VPN, deferring")
+                self._set_blocked()
+                if vpn.rotate(reason=f"403 on {item_url}"):
+                    self._blocked_until = 0.0
+                    self._close_stale_connections()
+                return None, True
+            if resp.status_code == 404:
+                self._cache_description(item_id, "")
+                return "", False
+
+            try:
+                resp.raise_for_status()
+            except requests.RequestException as e:
+                print(f"Item page fetch failed for {item_id}: {e} — deferring")
+                return None, True
+
+            description = self._extract_description(resp.text) or ""
+            self._cache_description(item_id, description)
+            return description, False
 
     def get_item_descriptions(self, items: list[tuple[int, str]]) -> dict[int, str | None]:
-        """Fetch descriptions for multiple (item_id, item_url) pairs concurrently."""
-        results: dict[int, str | None] = {}
+        """Fetch descriptions for multiple (item_id, item_url) pairs
+        concurrently, deferring any that hit a block/rate-limit/error to
+        later rounds instead of one at a time (see _run_in_rounds)."""
         if not items:
-            return results
-
-        with ThreadPoolExecutor(max_workers=DETAIL_CONCURRENCY) as pool:
-            futures = {
-                pool.submit(self.get_item_description, item_id, item_url): item_id
-                for item_id, item_url in items
-            }
-            for future in futures:
-                item_id = futures[future]
-                results[item_id] = future.result()
-        return results
+            return {}
+        keyed = [(item_id, item_url) for item_id, item_url in items]
+        return self._run_in_rounds(keyed, self._fetch_description_attempt)
 
     def _get_cached_description(self, item_id: int) -> str | None:
         with self._cache_lock:
@@ -569,79 +541,67 @@ class VintedScraper:
 
     # ── Seller country ────────────────────────────────────────────────────────
 
-    def get_user_country(self, user_id: int) -> dict | None:
-        """
-        Fetch a seller's country via their public profile.
-
-        Returns {"title": "Czechy", "code": "CZ"}, or None if unavailable
-        (blocked / removed / network error). Cached in-memory per scraper
-        instance — a seller's country essentially never changes.
-
-        Shares the same concurrency bound as `get_item_description` — call
-        this from multiple threads for a batch instead of one at a time.
-        """
-        if not user_id:
-            return None
-
+    def _fetch_country_attempt(self, user_id: int, _payload=None) -> tuple[dict | None, bool]:
+        """One attempt at a seller's country via their public profile.
+        Returns (country, needs_retry): country is {"title": ..., "code": ...}
+        or None if unavailable (removed / no country on file). needs_retry
+        True means this item should be deferred to a later round (see
+        _run_in_rounds)."""
         with self._cache_lock:
             if user_id in self._country_cache:
-                return self._country_cache[user_id]
+                return self._country_cache[user_id], False
 
         if self._is_blocked():
-            return None
+            return None, True
 
         with self._detail_semaphore:
             if self._is_blocked():
-                return None
+                return None, True
+            self._stagger_detail_dispatch()
+            url = f"{VINTED_API_URL}/users/{user_id}"
             try:
-                self._stagger_detail_dispatch()
-                resp = self._get_with_retry(f"{VINTED_API_URL}/users/{user_id}")
-                if resp is None:
-                    print(f"User profile fetch failed for {user_id}: still rate-limited after retries")
-                    return None
-
-                if resp.status_code == 403:
-                    print("403 Forbidden on user profile — rotating VPN and retrying.")
-                    self._set_blocked()
-                    retried = self._rotate_and_retry_get(f"{VINTED_API_URL}/users/{user_id}")
-                    if retried is None or retried.status_code == 403:
-                        if retried is not None:
-                            self._set_blocked()
-                        self._failed_count += 1
-                        return None
-                    resp = retried
-                if resp.status_code == 404:
-                    self._cache_country(user_id, None)
-                    return None
-
-                resp.raise_for_status()
-                data = resp.json().get("user") or {}
-                title = data.get("country_title")
-                code = data.get("country_iso_code")
-                country = {"title": title, "code": code} if title or code else None
-                self._cache_country(user_id, country)
-                return country
+                resp = self.session.get(url, timeout=15)
             except requests.RequestException as e:
-                print(f"User profile fetch failed for {user_id}: {e}")
-                self._failed_count += 1
-                return None
+                print(f"User profile fetch error for {user_id}: {e} — deferring")
+                return None, True
+            self._request_count += 1
+
+            if resp.status_code == 429:
+                print(f"429 Too Many Requests on user {user_id} — deferring")
+                return None, True
+            if resp.status_code == 403:
+                print(f"403 Forbidden on user {user_id} — rotating VPN, deferring")
+                self._set_blocked()
+                if vpn.rotate(reason=f"403 on {url}"):
+                    self._blocked_until = 0.0
+                    self._close_stale_connections()
+                return None, True
+            if resp.status_code == 404:
+                self._cache_country(user_id, None)
+                return None, False
+
+            try:
+                resp.raise_for_status()
+            except requests.RequestException as e:
+                print(f"User profile fetch failed for {user_id}: {e} — deferring")
+                return None, True
+
+            data = resp.json().get("user") or {}
+            title = data.get("country_title")
+            code = data.get("country_iso_code")
+            country = {"title": title, "code": code} if title or code else None
+            self._cache_country(user_id, country)
+            return country, False
 
     def get_user_countries(self, user_ids: list[int]) -> dict[int, dict | None]:
-        """Fetch seller countries for multiple user ids concurrently."""
-        results: dict[int, dict | None] = {}
+        """Fetch seller countries for multiple user ids concurrently,
+        deferring any that hit a block/rate-limit/error to later rounds
+        instead of one at a time (see _run_in_rounds)."""
         unique_ids = {uid for uid in user_ids if uid}
         if not unique_ids:
-            return results
-
-        with ThreadPoolExecutor(max_workers=DETAIL_CONCURRENCY) as pool:
-            futures = {
-                pool.submit(self.get_user_country, uid): uid
-                for uid in unique_ids
-            }
-            for future in futures:
-                uid = futures[future]
-                results[uid] = future.result()
-        return results
+            return {}
+        keyed = [(uid, None) for uid in unique_ids]
+        return self._run_in_rounds(keyed, self._fetch_country_attempt)
 
     def _cache_country(self, user_id: int, country: dict | None):
         with self._cache_lock:
