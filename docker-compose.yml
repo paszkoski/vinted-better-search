@@ -12,6 +12,8 @@ services:
     cap_add:
       - NET_ADMIN               # required for NordVPN to manage the tunnel interface
       - NET_RAW                  # required alongside NET_ADMIN for NordVPN's nftables/routing setup
+      - SYS_ADMIN                 # required to write net.ipv6.conf.all.disable_ipv6 — that sysctl isn't
+                                   # namespaced in this kernel, so NET_ADMIN alone can't unlock it
     devices:
       - /dev/net/tun             # required for NordVPN's tunnel device
     sysctls:
