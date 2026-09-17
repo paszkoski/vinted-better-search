@@ -2,8 +2,12 @@ FROM python:3.11-slim
 
 # NordVPN's Linux CLI + daemon (nordvpnd), used by vpn.py (via
 # nordvpn-switcher) to rotate to a new server whenever Vinted 403s.
-# gosu drops root after the daemon is up, since `nordvpn` CLI commands
-# refuse to run as root.
+# Everything here (daemon + CLI + the app) runs as root — nordvpnd is
+# started manually by docker-entrypoint.sh with no systemd, so nothing
+# fixes up the control socket's group ownership for a non-root user to
+# reach it; root always has access regardless. This matches NordVPN's
+# own documented headless/server setup (the "add yourself to the nordvpn
+# group" flow is for desktop multi-user boxes, not this).
 
 # Debian package installers sometimes try to start their service via
 # systemctl right after install — there's no systemd in a plain docker
@@ -19,7 +23,7 @@ RUN printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d \
 
 RUN apt-get update -qq \
     && apt-get install -y -qq --no-install-recommends \
-        curl ca-certificates gnupg iproute2 gosu git
+        curl ca-certificates gnupg iproute2 git
 
 # install.sh's own `apt-get install nordvpn` runs without -y — with no TTY
 # in a docker build, that Y/n prompt hits EOF and aborts. `yes` answers it.
@@ -28,10 +32,6 @@ RUN curl -sSf https://downloads.nordcdn.com/apps/linux/install.sh -o /tmp/nordvp
     && rm /tmp/nordvpn-install.sh
 
 RUN apt-get clean && rm -rf /var/lib/apt/lists/*
-
-# The installer creates the `nordvpn` group; membership is what lets a
-# non-root user talk to nordvpnd's control socket.
-RUN useradd --create-home --shell /bin/bash --groups nordvpn vintedapp
 
 WORKDIR /app
 
@@ -42,7 +42,6 @@ COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 COPY . .
-RUN chown -R vintedapp:vintedapp /app
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["python", "-u", "app.py"]

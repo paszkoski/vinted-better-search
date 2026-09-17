@@ -12,11 +12,11 @@ if [ -n "$NORDVPN_TOKEN" ]; then
     done
 
     echo "Logging in to NordVPN..."
-    gosu vintedapp nordvpn login --token "$NORDVPN_TOKEN"
-    gosu vintedapp nordvpn set technology NordLynx || true
-    gosu vintedapp nordvpn set killswitch off || true
+    nordvpn login --token "$NORDVPN_TOKEN"
+    nordvpn set technology NordLynx || true
+    nordvpn set killswitch off || true
 else
     echo "WARNING: NORDVPN_TOKEN is not set — VPN rotation on Vinted blocks will not work; the app falls back to a timed cooldown." >&2
 fi
 
-exec gosu vintedapp "$@"
+exec "$@"
