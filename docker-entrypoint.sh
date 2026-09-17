@@ -3,7 +3,10 @@ set -e
 
 if [ -n "$NORDVPN_TOKEN" ]; then
     echo "Starting nordvpnd..."
-    nordvpnd &
+    # First run asks a telemetry-consent question on stdin (wants literal
+    # "yes"/"no", not "y"/"n") with no TTY attached to answer it — without
+    # this it spins forever re-reading EOF as an "invalid response".
+    yes "yes" | nordvpnd &
 
     echo "Waiting for nordvpnd's control socket..."
     for i in $(seq 1 30); do
@@ -12,7 +15,7 @@ if [ -n "$NORDVPN_TOKEN" ]; then
     done
 
     echo "Logging in to NordVPN..."
-    nordvpn login --token "$NORDVPN_TOKEN"
+    yes "yes" | nordvpn login --token "$NORDVPN_TOKEN"
     nordvpn set technology NordLynx || true
     nordvpn set killswitch off || true
 else
