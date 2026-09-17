@@ -386,9 +386,12 @@ class VintedScraper:
         Vinted's per-endpoint rate limit even though it's well under the
         403-block threshold — that shows up as 429, not 403, and previously
         made the fetch (and the whole candidate item) silently give up.
-        Respects `Retry-After` when Vinted sends one, otherwise backs off
-        exponentially (capped). Returns the Response (whatever its status),
-        or None if still rate-limited after `max_attempts` tries.
+        Also rotates to a new VPN server before each retry — Vinted's rate
+        limit reads as tied to the source IP, so a new one plus the backoff
+        wait clears it faster than waiting alone. Respects `Retry-After`
+        when Vinted sends one, otherwise backs off exponentially (capped).
+        Returns the Response (whatever its status), or None if still
+        rate-limited after `max_attempts` tries.
         """
         for attempt in range(max_attempts):
             resp = self.session.get(url, timeout=15)
@@ -399,6 +402,7 @@ class VintedScraper:
                 self._failed_count += 1
                 return None
             self._retry_count += 1
+            vpn.rotate(reason=f"429 on {url} (attempt {attempt + 1}/{max_attempts})")
             retry_after = resp.headers.get("Retry-After")
             try:
                 wait = float(retry_after)
