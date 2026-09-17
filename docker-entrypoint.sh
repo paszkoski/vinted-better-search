@@ -16,7 +16,10 @@ if [ -n "$NORDVPN_TOKEN" ]; then
 
     echo "Logging in to NordVPN..."
     yes "yes" | nordvpn login --token "$NORDVPN_TOKEN"
-    nordvpn set technology NordLynx || true
+    # NordLynx (WireGuard-based) doesn't reliably establish tunnels inside a
+    # plain Docker container even with NET_ADMIN/tun granted — OpenVPN
+    # (userspace, TUN-only) works far more reliably here, at some cost to speed.
+    nordvpn set technology OpenVPN || true
     nordvpn set killswitch off || true
 else
     echo "WARNING: NORDVPN_TOKEN is not set — VPN rotation on Vinted blocks will not work; the app falls back to a timed cooldown." >&2
