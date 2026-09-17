@@ -4,12 +4,26 @@ FROM python:3.11-slim
 # nordvpn-switcher) to rotate to a new server whenever Vinted 403s.
 # gosu drops root after the daemon is up, since `nordvpn` CLI commands
 # refuse to run as root.
+
+# Debian package installers sometimes try to start their service via
+# systemctl right after install — there's no systemd in a plain docker
+# build, so that call errors and aborts apt-get (this is what breaks the
+# NordVPN .deb's postinst below). policy-rc.d blocks any service
+# auto-start attempt, and a no-op systemctl covers packages that call it
+# directly. Harmless here since nordvpnd is started manually by
+# docker-entrypoint.sh, never through systemd.
+RUN printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d \
+    && chmod +x /usr/sbin/policy-rc.d \
+    && printf '#!/bin/sh\nexit 0\n' > /usr/bin/systemctl \
+    && chmod +x /usr/bin/systemctl
+
 RUN apt-get update -qq \
     && apt-get install -y -qq --no-install-recommends \
-        curl ca-certificates gnupg iproute2 gosu git \
-    && curl -sSf https://downloads.nordcdn.com/apps/linux/install.sh | sh \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+        curl ca-certificates gnupg iproute2 gosu git
+
+RUN curl -sSf https://downloads.nordcdn.com/apps/linux/install.sh | sh
+
+RUN apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # The installer creates the `nordvpn` group; membership is what lets a
 # non-root user talk to nordvpnd's control socket.
