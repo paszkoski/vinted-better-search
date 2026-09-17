@@ -21,7 +21,11 @@ RUN apt-get update -qq \
     && apt-get install -y -qq --no-install-recommends \
         curl ca-certificates gnupg iproute2 gosu git
 
-RUN curl -sSf https://downloads.nordcdn.com/apps/linux/install.sh | sh
+# install.sh's own `apt-get install nordvpn` runs without -y — with no TTY
+# in a docker build, that Y/n prompt hits EOF and aborts. `yes` answers it.
+RUN curl -sSf https://downloads.nordcdn.com/apps/linux/install.sh -o /tmp/nordvpn-install.sh \
+    && yes | sh /tmp/nordvpn-install.sh \
+    && rm /tmp/nordvpn-install.sh
 
 RUN apt-get clean && rm -rf /var/lib/apt/lists/*
 
