@@ -23,6 +23,11 @@ VINTED_PROXY = os.environ.get("VINTED_PROXY", "")                     # proxy in
 # gets a small random jitter before it fires so they don't all launch at once.
 DETAIL_CONCURRENCY = int(os.environ.get("DETAIL_CONCURRENCY", 5))
 DETAIL_JITTER_SECONDS = float(os.environ.get("DETAIL_JITTER_SECONDS", 0.3))
+# Minimum spacing enforced between successive detail-fetch dispatches, on top
+# of the random jitter above — without it, DETAIL_CONCURRENCY workers can all
+# fire within the same jitter window, and Vinted's rate limit reads that
+# burst as automated and escalates straight to a 403 block.
+DETAIL_MIN_GAP_SECONDS = float(os.environ.get("DETAIL_MIN_GAP_SECONDS", 0.5))
 
 SESSION_REFRESH_INTERVAL = 50  # refresh session every N API calls
 

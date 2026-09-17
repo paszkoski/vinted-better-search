@@ -36,6 +36,7 @@ from config import (
     MIN_API_DELAY,
     DETAIL_CONCURRENCY,
     DETAIL_JITTER_SECONDS,
+    DETAIL_MIN_GAP_SECONDS,
     VINTED_PROXY,
     DESCRIPTION_CACHE_SIZE,
 )
@@ -117,6 +118,11 @@ class VintedScraper:
         self._block_lock = threading.Lock()
         # Bounds how many item-description / user-profile fetches run in flight at once
         self._detail_semaphore = threading.Semaphore(DETAIL_CONCURRENCY)
+        # Staggers detail-fetch *dispatches* so DETAIL_CONCURRENCY workers don't
+        # all fire in the same instant — a burst like that trips Vinted's rate
+        # limit almost immediately (seen escalating straight to a 403 block).
+        self._detail_throttle_lock = threading.Lock()
+        self._last_detail_dispatch = 0.0
         self._apply_headers()
         self._apply_proxy()
         self._init_session()
@@ -186,9 +192,9 @@ class VintedScraper:
     def _set_blocked(self):
         with self._block_lock:
             self._blocked_until = time.time() + BLOCK_WAIT_SECONDS
-            wait_min = BLOCK_WAIT_SECONDS // 60
+            wait_min = BLOCK_WAIT_SECONDS / 60
             mode = "proxy" if self._use_proxy else "direct"
-            print(f"Blocked by Vinted (403) on {mode} connection! Pausing this identity for {wait_min} minutes...")
+            print(f"Blocked by Vinted (403) on {mode} connection! Pausing this identity for {wait_min:.1f} minutes...")
             if self._on_blocked:
                 try:
                     self._on_blocked(wait_min)
@@ -201,6 +207,26 @@ class VintedScraper:
         elapsed = time.time() - self._last_request_time
         if elapsed < min_delay:
             wait = min_delay - elapsed + random.uniform(0.0, 0.4)
+            time.sleep(wait)
+
+    def _stagger_detail_dispatch(self):
+        """Space out detail-fetch dispatches by at least DETAIL_MIN_GAP_SECONDS,
+        on top of the existing random jitter.
+
+        DETAIL_CONCURRENCY lets several detail fetches run *in flight* at
+        once, but without this, all of them fire within the same
+        DETAIL_JITTER_SECONDS window — a burst that Vinted's rate limit
+        reads as automated and escalates to a 403 block almost immediately.
+        Reserving each dispatch's earliest start time under a lock keeps
+        the concurrency (they still overlap in flight) while guaranteeing
+        real spacing between when each one actually goes out.
+        """
+        with self._detail_throttle_lock:
+            now = time.time()
+            earliest = max(now, self._last_detail_dispatch + DETAIL_MIN_GAP_SECONDS)
+            self._last_detail_dispatch = earliest
+        wait = (earliest - now) + random.uniform(0.0, DETAIL_JITTER_SECONDS)
+        if wait > 0:
             time.sleep(wait)
 
     # ── Session management ────────────────────────────────────────────────────
@@ -389,7 +415,7 @@ class VintedScraper:
             if self._is_blocked():
                 return None
             try:
-                time.sleep(random.uniform(0.0, DETAIL_JITTER_SECONDS))
+                self._stagger_detail_dispatch()
                 resp = self._get_with_retry(item_url)
                 if resp is None:
                     print(f"Item page fetch failed for {item_id}: still rate-limited after retries")
@@ -483,7 +509,7 @@ class VintedScraper:
             if self._is_blocked():
                 return None
             try:
-                time.sleep(random.uniform(0.0, DETAIL_JITTER_SECONDS))
+                self._stagger_detail_dispatch()
                 resp = self._get_with_retry(f"{VINTED_API_URL}/users/{user_id}")
                 if resp is None:
                     print(f"User profile fetch failed for {user_id}: still rate-limited after retries")

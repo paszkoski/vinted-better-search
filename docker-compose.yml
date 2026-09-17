@@ -8,10 +8,11 @@ services:
     command: >
       sh -c "command -v git >/dev/null || (apt-get update -qq && apt-get install -y -qq --no-install-recommends git) &&
              pip install -r requirements.txt -q --no-cache-dir &&
-             python app.py"
+             python -u app.py"
     ports:
       - "${PORT:-5000}:5000"
     environment:
+      - PYTHONUNBUFFERED=1     # without this, scraper.py's block/retry diagnostics never reach `docker logs`
       - VINTED_BASE_URL        # e.g. https://www.vinted.de (optional, defaults to vinted.pl)
       - PORT                   # web port inside container (optional, default 5000)
       - BLOCK_WAIT_SECONDS     # seconds to pause after a 403 block (optional, default 1800 = 30 min)
