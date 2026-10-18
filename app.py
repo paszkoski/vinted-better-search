@@ -11,7 +11,14 @@ from datetime import datetime, timezone
 from flask import Flask, render_template, request, jsonify
 
 from scraper import VintedScraper
-from matcher import parse_keyword_groups, parse_keywords, title_satisfies, full_satisfies
+from matcher import (
+    parse_keyword_groups,
+    parse_keywords,
+    listing_satisfies,
+    full_satisfies,
+    first_exclude_hit,
+    missing_groups,
+)
 from categories import get_categories
 from config import (
     DEFAULT_ORDER,
@@ -19,6 +26,7 @@ from config import (
     DEFAULT_MAX_SCAN,
     CATALOG_PER_PAGE,
     VINTED_BASE_URL,
+    DEEP_SEARCH_MAX_ITEMS,
 )
 
 PORT = int(os.environ.get("PORT", 5000))
@@ -112,7 +120,9 @@ def build_result(item: dict, description: str | None) -> dict:
         "favourite_count": item.get("favourite_count", 0),
         "listed_at": _photo_upload_date(photo),
         "seller_id": (item.get("user") or {}).get("id"),
-        "country": None,  # filled in by run_search once results are final
+        # Left empty by quick search — filling it needs a per-seller profile
+        # request, so only Deep Search pays for it.
+        "country": None,
     }
 
 
@@ -135,13 +145,20 @@ def run_search(
     order: str,
     max_results: int,
     max_scan: int,
+    show_partial: bool,
 ) -> dict:
     """
-    Scan Vinted search results and return only items where every include
-    group (at least one alternative per group) appears in the title or
-    description, and no exclude keyword does. Title-only matches skip the
-    description fetch; everything else needs one extra request per
-    candidate item.
+    Stage 1 — scan Vinted search results and match on listing fields only
+    (title + brand), which every candidate already carries. Deliberately
+    fetches nothing per item: no item pages, no seller profiles. Items whose
+    listing doesn't settle the match are simply not results; the description
+    hunt is what Deep Search (below) does, and only for selected items.
+
+    With `show_partial`, candidates matching only *some* include groups are
+    also returned (flagged `partial` + the groups they're `missing`), so the
+    user can Deep Search them to check the description — but only when at
+    least one group did match, so Vinted's fuzzy pool doesn't flood the grid.
+    Partials never count toward `max_results`; they're capped separately.
     """
     scraper = get_scraper()
     started = time.time()
@@ -159,14 +176,14 @@ def run_search(
         )
 
     results = []
+    partials = []
     scanned = 0
-    fetched = 0
     page = 1
     search_session_id = None
     blocked = False
 
     _set_progress(active=True, phase="searching", page=0, scanned=0, found=0,
-                   fetched=0, to_fetch=0, requests_sent=0, retries=0, failed=0)
+                   to_fetch=0, requests_sent=0, retries=0, failed=0)
 
     try:
         while len(results) < max_results and scanned < max_scan:
@@ -191,68 +208,144 @@ def run_search(
                     blocked = True
                 break
 
-            # First pass: resolve what title alone can settle, and collect the
-            # rest to fetch. Descriptions for a whole page are then fetched
-            # concurrently (bounded by DETAIL_CONCURRENCY) instead of one at a
-            # time — that's what keeps a search from taking minutes.
-            needs_fetch = []  # (item, title) pairs
             for item in items:
                 if scanned >= max_scan or len(results) >= max_results:
                     break
                 scanned += 1
 
-                title = item.get("title", "")
-                verdict = title_satisfies(title, include_groups, exclude_terms)
-                if verdict is True:
-                    results.append(build_result(item, description=None))
-                elif verdict is None:
-                    needs_fetch.append((item, title))
+                # Listing fields only — "brand_title" rides along in the same
+                # search response as "title", so this costs zero requests.
+                listing_text = f"{item.get('title', '')} {item.get('brand_title', '')}"
+                if listing_satisfies(listing_text, include_groups, exclude_terms):
+                    result = build_result(item, description=None)
+                    result["partial"] = False
+                    results.append(result)
+                    continue
+
+                # Not a full match. An exclude term rejects outright; otherwise
+                # include groups are missing, which is a partial only when it
+                # was asked for, at least one group did match, and there's room
+                # under the separate partial cap. Full matches stop the scan
+                # (above), so partials can never crowd out max_results.
+                if first_exclude_hit(listing_text, exclude_terms):
+                    continue
+                missing = missing_groups(listing_text, include_groups)
+                if show_partial and len(missing) < len(include_groups) and len(partials) < max_results:
+                    partial = build_result(item, description=None)
+                    partial["partial"] = True
+                    partial["missing"] = [" OR ".join(group) for group in missing]
+                    partials.append(partial)
 
             _report(phase="searching", scanned=scanned, found=len(results))
-
-            if needs_fetch and len(results) < max_results:
-                _report(phase="checking descriptions", to_fetch=len(needs_fetch))
-                descriptions = scraper.get_item_descriptions(
-                    [(item.get("id"), _item_url(item)) for item, _ in needs_fetch]
-                )
-                fetched += len(needs_fetch)
-                for item, title in needs_fetch:
-                    description = descriptions.get(item.get("id"))
-                    if description is None:
-                        # Couldn't verify (blocked / removed / network error) — skip
-                        # rather than guess, so results never silently show a non-match.
-                        continue
-                    if full_satisfies(title, description, include_groups, exclude_terms):
-                        results.append(build_result(item, description=description))
-                _report(phase="searching", fetched=fetched, found=len(results), to_fetch=0)
 
             pagination = data.get("pagination", {})
             total_pages = pagination.get("total_pages", 1)
             if page >= total_pages:
                 break
             page += 1
-
-        # Country needs a per-seller profile fetch — only worth doing for the
-        # items actually being shown, not every candidate that got scanned.
-        seller_ids = [r["seller_id"] for r in results if r["seller_id"]]
-        if seller_ids:
-            _report(phase="resolving seller countries", to_fetch=len(seller_ids))
-            countries = scraper.get_user_countries(seller_ids)
-            for r in results:
-                country = countries.get(r["seller_id"])
-                if country:
-                    r["country"] = country.get("title") or country.get("code")
-        for r in results:
-            r.pop("seller_id", None)
     finally:
         _report(active=False, phase="done", to_fetch=0)
 
     return {
-        "results": results,
+        # Full matches first, then partials — the frontend renders them in that
+        # order with a divider between.
+        "results": results + partials,
+        "partial_count": len(partials),
         "scanned": scanned,
-        "fetched": fetched,
         "truncated": scanned >= max_scan and len(results) < max_results,
         "blocked": blocked,
+        "elapsed_seconds": round(time.time() - started, 1),
+        "requests_sent": scraper.request_count - requests_before,
+        "failed_requests": scraper.failed_count - failed_before,
+    }
+
+
+def run_deep_search(
+    items: list[dict],
+    include_groups: list[list[str]],
+    exclude_terms: list[str],
+) -> dict:
+    """
+    Stage 2 — for the items the user explicitly selected, fetch the item page
+    (for the description) and the seller profile (for country), then re-check
+    each against title + description.
+
+    Every selected item gets a verdict, and cards are never silently dropped:
+    `match` (verified), `excluded` (an exclude term only in the description),
+    `unverified` (page couldn't be fetched — retryable), or `no_match`
+    (fetched, but still missing an include group — only reachable if the item
+    was deep-searched with different keywords than produced it).
+    """
+    scraper = get_scraper()
+    started = time.time()
+    requests_before = scraper.request_count
+    retries_before = scraper.retry_count
+    failed_before = scraper.failed_count
+    _progress_baseline.update(requests=requests_before, retries=retries_before, failed=failed_before)
+
+    def _report(**extra):
+        _set_progress(
+            requests_sent=scraper.request_count - requests_before,
+            retries=scraper.retry_count - retries_before,
+            failed=scraper.failed_count - failed_before,
+            **extra,
+        )
+
+    outcomes = []
+    _set_progress(active=True, phase="deep: checking descriptions", to_fetch=len(items),
+                   checked=0, requests_sent=0, retries=0, failed=0)
+
+    try:
+        descriptions = scraper.get_item_descriptions(
+            [(item["id"], item["url"]) for item in items]
+        )
+        checked = 0
+        for item in items:
+            description = descriptions.get(item["id"])
+            row = {
+                "id": item["id"],
+                "description": "",
+                "excluded_by": None,
+                "country": None,
+            }
+            if description is None:
+                # Blocked / removed / network error. Say so honestly instead of
+                # guessing either way, and leave the item checked so the user
+                # can just hit Deep Search again.
+                row["verdict"] = "unverified"
+            else:
+                row["description"] = description
+                title = item.get("title", "")
+                excluded_by = first_exclude_hit(f"{title} {description}", exclude_terms)
+                if excluded_by:
+                    row["verdict"] = "excluded"
+                    row["excluded_by"] = excluded_by
+                elif full_satisfies(title, description, include_groups, exclude_terms):
+                    row["verdict"] = "match"
+                else:
+                    row["verdict"] = "no_match"
+            outcomes.append(row)
+            checked += 1
+            _report(phase="deep: checking descriptions", checked=checked,
+                    to_fetch=len(items) - checked)
+
+        # Country is a per-seller profile fetch; do it for every selected item
+        # (useful even on excluded cards) but each seller only once — the
+        # scraper caches by user id.
+        seller_ids = [item.get("seller_id") for item in items if item.get("seller_id")]
+        if seller_ids:
+            _report(phase="deep: resolving seller countries", to_fetch=len(seller_ids))
+            countries = scraper.get_user_countries(seller_ids)
+            rows_by_id = {row["id"]: row for row in outcomes}
+            for item in items:
+                country = countries.get(item.get("seller_id"))
+                if country:
+                    rows_by_id[item["id"]]["country"] = country.get("title") or country.get("code")
+    finally:
+        _report(active=False, phase="done", to_fetch=0)
+
+    return {
+        "items": outcomes,
         "elapsed_seconds": round(time.time() - started, 1),
         "requests_sent": scraper.request_count - requests_before,
         "failed_requests": scraper.failed_count - failed_before,
@@ -326,6 +419,9 @@ def api_search():
     # actual OR logic is enforced by our own matching afterwards.
     search_text = " ".join(group[0] for group in include_groups)
 
+    # Opt-in: also return candidates matching only some include groups.
+    show_partial = request.args.get("partial", "").strip().lower() in ("1", "true", "on", "yes")
+
     if not _search_lock.acquire(blocking=False):
         return jsonify({"ok": False, "error": "A search is already in progress. Try again in a moment."}), 429
 
@@ -340,6 +436,70 @@ def api_search():
             order=order,
             max_results=max_results,
             max_scan=max_scan,
+            show_partial=show_partial,
+        )
+    finally:
+        _search_lock.release()
+
+    return jsonify({"ok": True, **outcome})
+
+
+@app.route("/api/deep-search", methods=["POST"])
+def api_deep_search():
+    # Stage 2 of the two-stage flow (see run_deep_search). The client sends
+    # back the search's keywords plus the specific items it wants checked, so
+    # this never re-runs the whole search — just the selected item pages.
+    payload = request.get_json(silent=True) or {}
+
+    include_groups = parse_keyword_groups(payload.get("q", ""))
+    exclude_terms = parse_keywords(payload.get("exclude", ""))
+    if not include_groups:
+        return jsonify({"ok": False, "error": "Enter at least one keyword."}), 400
+
+    raw_items = payload.get("items")
+    if not isinstance(raw_items, list) or not raw_items:
+        return jsonify({"ok": False, "error": "Select at least one item to deep-search."}), 400
+    if len(raw_items) > DEEP_SEARCH_MAX_ITEMS:
+        return jsonify({
+            "ok": False,
+            "error": f"Too many items — Deep Search handles up to {DEEP_SEARCH_MAX_ITEMS} at a time.",
+        }), 400
+
+    # The client hands us URLs to fetch, so treat the whole payload as
+    # untrusted: ids must be real ints and every URL must live on the
+    # configured Vinted host. Requiring the "/" boundary keeps a look-alike
+    # host (e.g. https://www.vinted.pl.evil.example) from sneaking through
+    # startswith() and turning this into an SSRF proxy.
+    vinted_prefix = VINTED_BASE_URL.rstrip("/") + "/"
+    items = []
+    for raw in raw_items:
+        if not isinstance(raw, dict):
+            return jsonify({"ok": False, "error": "Malformed item in Deep Search request."}), 400
+        item_id = raw.get("id")
+        url = raw.get("url")
+        if not isinstance(item_id, int) or isinstance(item_id, bool):
+            return jsonify({"ok": False, "error": "Malformed item id in Deep Search request."}), 400
+        if not isinstance(url, str) or not url.startswith(vinted_prefix):
+            return jsonify({"ok": False, "error": "Item URL is not on the configured Vinted domain."}), 400
+        seller_id = raw.get("seller_id")
+        if not isinstance(seller_id, int) or isinstance(seller_id, bool):
+            seller_id = None
+        items.append({
+            "id": item_id,
+            "url": url,
+            "title": raw.get("title") if isinstance(raw.get("title"), str) else "",
+            "brand": raw.get("brand") if isinstance(raw.get("brand"), str) else "",
+            "seller_id": seller_id,
+        })
+
+    if not _search_lock.acquire(blocking=False):
+        return jsonify({"ok": False, "error": "A search is already in progress. Try again in a moment."}), 429
+
+    try:
+        outcome = run_deep_search(
+            items=items,
+            include_groups=include_groups,
+            exclude_terms=exclude_terms,
         )
     finally:
         _search_lock.release()

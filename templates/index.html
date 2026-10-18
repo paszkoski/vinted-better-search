@@ -97,6 +97,14 @@
     .field input:focus, .field select:focus { border-color: var(--rust); }
     .hint { margin: 0; font-size: .78rem; color: var(--muted); line-height: 1.45; }
 
+    .check-field {
+      display: inline-flex; align-items: center; gap: .5rem;
+      font-size: .88rem; font-weight: 500; cursor: pointer;
+    }
+    .check-field input {
+      width: 16px; height: 16px; margin: 0; cursor: pointer; accent-color: var(--rust);
+    }
+
     .ticket-row + .ticket-row { margin-top: 1.1rem; }
     .ticket-divider {
       border: none; border-top: 1px dashed var(--line); margin: 1.25rem 0;
@@ -169,6 +177,23 @@
       font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
     }
     .stats { font-size: .8rem; color: var(--muted); text-align: right; }
+    .results-actions {
+      display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; justify-content: flex-end;
+    }
+    .btn-ghost {
+      font-family: 'JetBrains Mono', monospace; font-size: .68rem; font-weight: 700;
+      letter-spacing: .04em; text-transform: uppercase;
+      background: none; color: var(--ink); border: 1px solid var(--line);
+      border-radius: 2px; padding: .42rem .6rem; cursor: pointer;
+      transition: border-color .15s ease, color .15s ease;
+    }
+    .btn-ghost:hover:not(:disabled) { border-color: var(--rust); color: var(--rust); }
+    .btn-ghost:disabled { opacity: .45; cursor: not-allowed; }
+    .btn-deep { padding: .5rem .85rem; font-size: .72rem; }
+    .deep-hint {
+      margin: 0; padding: .55rem 1.25rem; border-bottom: 1px solid var(--line);
+      font-size: .78rem; color: var(--muted);
+    }
     .results-body { padding: 1.1rem; min-height: 60px; }
 
     .cards-grid {
@@ -196,6 +221,52 @@
       letter-spacing: .08em; padding: .2rem 2rem;
       box-shadow: 0 1px 3px rgba(0, 0, 0, .3);
     }
+
+    /* Deep-search selection: a big tap target over the image, not a tiny box. */
+    .pick-wrap {
+      position: absolute; top: .45rem; left: .45rem; z-index: 3;
+      display: flex; align-items: center; justify-content: center;
+      width: 34px; height: 34px; border-radius: 3px; cursor: pointer;
+      background: rgba(253, 252, 248, .92); border: 1px solid var(--line);
+    }
+    .pick-wrap:hover { border-color: var(--rust); }
+    .pick { width: 20px; height: 20px; margin: 0; cursor: pointer; accent-color: var(--rust); }
+    .sr-only {
+      position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+      overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+    }
+
+    .verdict {
+      align-self: flex-start;
+      font-family: 'JetBrains Mono', monospace; font-size: .62rem; font-weight: 700;
+      letter-spacing: .04em; text-transform: uppercase;
+      padding: .22rem .45rem; border-radius: 2px;
+    }
+    .verdict--excluded {
+      color: var(--rust-dark); background: rgba(143, 58, 28, .14);
+      border: 1px solid rgba(143, 58, 28, .35);
+    }
+    .verdict--unverified {
+      color: var(--kraft-ink); background: rgba(74, 63, 38, .12);
+      border: 1px solid rgba(74, 63, 38, .3);
+    }
+    .verdict--partial {
+      color: var(--kraft-ink); background: rgba(205, 187, 146, .38);
+      border: 1px solid rgba(74, 63, 38, .3);
+    }
+    /* Excluded cards stay in the grid but fade back so they read as "not it". */
+    .tag-card--excluded { opacity: .55; }
+    .tag-card--excluded:hover { opacity: .85; }
+
+    /* Divider between full matches and the opt-in partial ones. */
+    .partial-head {
+      margin: 1.2rem 0 .8rem; padding-top: 1rem; border-top: 1px dashed var(--line);
+    }
+    .partial-head h3 {
+      margin: 0 0 .2rem; font-family: 'JetBrains Mono', monospace; font-size: .72rem;
+      font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted);
+    }
+    .partial-head p { margin: 0; font-size: .78rem; color: var(--muted); }
 
     .tag-media {
       width: 100%; height: 190px; background: #eee;
@@ -272,7 +343,7 @@
         <div class="field">
           <label for="q">Keywords <span class="req">required</span></label>
           <input type="text" id="q" placeholder="e.g. keychron OR key chron, k3, wireless" autofocus>
-          <p class="hint">Comma-separated groups (all required), each optionally with <strong>OR</strong> alternatives, e.g. "keychron OR key chron, k3". Matched against the item's title <strong>or</strong> description — unlike Vinted's own search, which often ignores them.</p>
+          <p class="hint">Comma-separated groups (all required), each optionally with <strong>OR</strong> alternatives, e.g. "keychron OR key chron, k3". Search matches the listing's title <strong>and</strong> brand; Run Deep Search then re-checks selected items against their full description.</p>
         </div>
       </div>
 
@@ -316,11 +387,19 @@
         </div>
       </div>
 
+      <div class="ticket-row">
+        <label class="check-field" for="partial">
+          <input type="checkbox" id="partial">
+          Show partial matches
+        </label>
+        <p class="hint" style="margin-top:.35rem">Also list items whose title/brand matches only some keyword groups — Deep Search them to check the description.</p>
+      </div>
+
       <div class="ticket-footer">
         <button type="button" id="searchBtn" class="btn-run">
           <i class="bi bi-search"></i> Run search
         </button>
-        <p class="hint">Checks title first; falls back to fetching the full description when needed — this can take a while for larger searches.</p>
+        <p class="hint">Matches the listing's title and brand only — no per-item requests, so it's quick. Tick the results you care about, then hit <strong>Run Deep Search</strong> to check their descriptions.</p>
       </div>
     </form>
   </section>
@@ -329,8 +408,18 @@
   <section class="results-panel">
     <div class="results-head">
       <h2>Results</h2>
-      <span id="searchStats" class="stats"></span>
+      <div class="results-actions">
+        <span id="searchStats" class="stats"></span>
+        <button type="button" id="selectAllBtn" class="btn-ghost" style="display:none">Select all</button>
+        <button type="button" id="clearSelBtn" class="btn-ghost" style="display:none">Clear</button>
+        <button type="button" id="deepBtn" class="btn-run btn-deep" style="display:none">
+          <i class="bi bi-search-heart"></i> Run Deep Search (0)
+        </button>
+      </div>
     </div>
+    <p class="deep-hint" id="deepHint" style="display:none">
+      Deep Search opens each selected item on Vinted — select only what you need.
+    </p>
     <div class="results-body">
       <div id="resultsGrid">
         <div class="state">
@@ -375,23 +464,43 @@
     return description.slice(0, radius * 2);
   }
 
-  function renderResults(results, includeTerms) {
-    if (!results.length) {
-      return `<div class="state">
-        <i class="bi bi-emoji-frown"></i>
-        <p>No items matched every keyword. Try fewer or broader keywords.</p>
-      </div>`;
+  // Stage-1 results are listing-only, so `verdict` is undefined until the
+  // card goes through Deep Search: "match" | "excluded" | "unverified" | "no_match".
+  function verdictBadge(r) {
+    if (r.verdict === 'match') return '';   // verified stamp covers it
+    if (r.verdict === 'excluded') {
+      return `<span class="verdict verdict--excluded">Excluded${r.excluded_by ? ': ' + escHtml(r.excluded_by) : ''}</span>`;
     }
-    const cards = results.map(r => {
-      const priceStr = `${r.price ?? '?'} ${escHtml(r.currency)}`;
-      const verified = Boolean(r.description);
-      const snippet = r.description
-        ? `<div class="tag-snippet">${highlight(snippetAround(r.description, includeTerms), includeTerms)}</div>`
-        : '';
-      return `
-      <div class="tag-card">
+    if (r.verdict === 'unverified') {
+      return '<span class="verdict verdict--unverified">Couldn\'t fetch — try again</span>';
+    }
+    if (r.verdict === 'no_match') {
+      return '<span class="verdict verdict--unverified">No keyword match in description</span>';
+    }
+    if (r.partial) {
+      const missing = (r.missing || []).join(', ');
+      return `<span class="verdict verdict--partial">Partial — missing: ${escHtml(missing)}</span>`;
+    }
+    return '';
+  }
+
+  function renderCard(r, includeTerms) {
+    const priceStr = `${r.price ?? '?'} ${escHtml(r.currency)}`;
+    const verified = r.verdict === 'match';
+    // A deep-scanned partial that turned out not to match is dimmed like an
+    // excluded item — the description settled it, so it's not a "maybe".
+    const dimmed = r.verdict === 'excluded' || r.verdict === 'no_match';
+    const snippet = r.description
+      ? `<div class="tag-snippet">${highlight(snippetAround(r.description, includeTerms), includeTerms)}</div>`
+      : '';
+    return `
+      <div class="tag-card ${dimmed ? 'tag-card--excluded' : ''}" data-id="${escHtml(r.id)}">
         <div class="tag-card-accent ${verified ? 'tag-card-accent--verified' : ''}"></div>
         ${verified ? '<div class="stamp">Verified</div>' : ''}
+        <label class="pick-wrap" title="Select for Deep Search">
+          <input type="checkbox" class="pick" data-id="${escHtml(r.id)}"${r.selected ? ' checked' : ''}>
+          <span class="sr-only">Select for Deep Search</span>
+        </label>
         <div class="tag-media">
           ${r.image_url
             ? `<img src="${escHtml(r.image_url)}" alt="${escHtml(r.title)}" loading="lazy">`
@@ -402,14 +511,76 @@
           <div class="tag-title">${highlight(r.title, includeTerms)}</div>
           ${r.brand ? `<div class="tag-meta">${escHtml(r.brand)}${r.size ? ' · ' + escHtml(r.size) : ''}</div>` : ''}
           ${(r.listed_at || r.country) ? `<div class="tag-meta">${[r.listed_at, r.country].filter(Boolean).map(escHtml).join(' · ')}</div>` : ''}
+          ${verdictBadge(r)}
           ${snippet}
         </div>
         <div class="tag-foot">
           <a href="${escHtml(r.url)}" target="_blank" rel="noopener" class="btn-view">View on Vinted</a>
         </div>
       </div>`;
-    }).join('');
-    return `<div class="cards-grid">${cards}</div>`;
+  }
+
+  function renderResults(results, includeTerms) {
+    if (!results.length) {
+      return `<div class="state">
+        <i class="bi bi-emoji-frown"></i>
+        <p>No items matched every keyword. Try fewer or broader keywords.</p>
+      </div>`;
+    }
+    // Full matches lead; partials (if the toggle was on) follow under a divider.
+    const full = results.filter(r => !r.partial);
+    const partial = results.filter(r => r.partial);
+    const fullHtml = full.length
+      ? `<div class="cards-grid">${full.map(r => renderCard(r, includeTerms)).join('')}</div>`
+      : '';
+    const partialHtml = partial.length
+      ? `<div class="partial-head">
+          <h3>Partial matches</h3>
+          <p>Title/brand matched only some keywords; Run Deep Search to check descriptions.</p>
+        </div>
+        <div class="cards-grid">${partial.map(r => renderCard(r, includeTerms)).join('')}</div>`
+      : '';
+    return fullHtml + partialHtml;
+  }
+
+  // ── Two-stage search state ────────────────────────────────────────────────
+  // The grid's result objects are kept around between stages: Deep Search
+  // needs each item's url/title/brand/seller_id, and cards are re-rendered
+  // in place from these objects instead of being rebuilt from a new response.
+  let lastSearch = null;          // {q, exclude, includeTerms} that produced the current grid
+  const resultsById = new Map();  // id -> result object (mutable)
+  let busy = false;
+
+  function setBusy(on) {
+    busy = on;
+    document.getElementById('selectAllBtn').disabled = on;
+    document.getElementById('clearSelBtn').disabled = on;
+    syncSelectionUI();
+  }
+
+  function selectedResults() {
+    return Array.from(resultsById.values()).filter(r => r.selected);
+  }
+
+  function syncSelectionUI() {
+    const btn = document.getElementById('deepBtn');
+    const n = selectedResults().length;
+    btn.disabled = busy || n === 0;
+    btn.innerHTML = `<i class="bi bi-search-heart"></i> Run Deep Search (${n})`;
+  }
+
+  function showDeepControls(show) {
+    for (const id of ['selectAllBtn', 'clearSelBtn', 'deepBtn', 'deepHint']) {
+      document.getElementById(id).style.display = show ? '' : 'none';
+    }
+    if (show) syncSelectionUI();
+  }
+
+  function updateCard(id) {
+    const r = resultsById.get(id);
+    const card = document.querySelector(`.tag-card[data-id="${id}"]`);
+    if (!r || !card) return;
+    card.outerHTML = renderCard(r, lastSearch ? lastSearch.includeTerms : []);
   }
 
   // ── Category picker ───────────────────────────────────────────────────────
@@ -479,15 +650,39 @@
     return /^\d+(,\s*\d+)*$/.test(raw) ? raw : '';
   }
 
+  // Shared by both stages — the backend keeps one global progress record
+  // because _search_lock guarantees only one of them runs at a time.
+  const PHASE_LABELS = {
+    searching: 'Scanning candidates',
+    'deep: checking descriptions': 'Checking item descriptions',
+    'deep: resolving seller countries': 'Resolving seller countries',
+    done: 'Wrapping up…',
+  };
+
+  function renderProgress(p, el) {
+    if (!el || !p || !p.active) return;
+    const bits = [PHASE_LABELS[p.phase] || 'Working…'];
+    if (p.page) bits.push(`page ${p.page}`);
+    if (p.scanned) bits.push(`${p.scanned} scanned`);
+    if (p.found) bits.push(`${p.found} matched`);
+    if (p.checked) bits.push(`${p.checked} checked`);
+    if (p.to_fetch) bits.push(`${p.to_fetch} in flight`);
+    bits.push(`${p.requests_sent || 0} requests sent${p.failed ? ` (${p.failed} failed)` : ''}`);
+    if (p.retries) bits.push(`${p.retries} retried`);
+    el.textContent = bits.join(' · ');
+  }
+
   async function runSearch() {
     const q = document.getElementById('q').value.trim();
     if (!q) {
       document.getElementById('q').focus();
       return;
     }
+    const exclude = document.getElementById('exclude').value.trim();
     const params = new URLSearchParams({
       q,
-      exclude: document.getElementById('exclude').value.trim(),
+      exclude,
+      partial: document.getElementById('partial').checked ? '1' : '0',
       catalog_ids: resolveCatalogIds(),
       price_from: document.getElementById('price_from').value.trim(),
       price_to: document.getElementById('price_to').value.trim(),
@@ -499,6 +694,10 @@
     const grid = document.getElementById('resultsGrid');
     const stats = document.getElementById('searchStats');
 
+    // A new search replaces the grid, so the previous selection no longer
+    // means anything — hide the Deep Search controls until results land.
+    showDeepControls(false);
+
     btn.disabled = true;
     btn.innerHTML = '<span class="spin spin-dark"></span>Searching…';
     stats.textContent = '';
@@ -507,33 +706,10 @@
         <p id="searchProgress">Starting search…</p>
       </div>`;
 
-    const PHASE_LABELS = {
-      searching: 'Scanning candidates',
-      'checking descriptions': 'Checking descriptions',
-      'resolving seller countries': 'Resolving seller countries',
-      done: 'Wrapping up…',
-    };
-
-    const progressEl = () => document.getElementById('searchProgress');
-
-    function renderProgress(p) {
-      const el = progressEl();
-      if (!el || !p || !p.active) return;
-      const bits = [PHASE_LABELS[p.phase] || 'Working…'];
-      if (p.page) bits.push(`page ${p.page}`);
-      if (p.scanned) bits.push(`${p.scanned} scanned`);
-      if (p.found) bits.push(`${p.found} matched`);
-      if (p.fetched) bits.push(`${p.fetched} descriptions checked`);
-      if (p.to_fetch) bits.push(`${p.to_fetch} in flight`);
-      bits.push(`${p.requests_sent || 0} requests sent${p.failed ? ` (${p.failed} failed)` : ''}`);
-      if (p.retries) bits.push(`${p.retries} retried`);
-      el.textContent = bits.join(' · ');
-    }
-
     const progressTimer = setInterval(async () => {
       try {
         const r = await fetch('/api/search/progress', { cache: 'no-store' });
-        renderProgress(await r.json());
+        renderProgress(await r.json(), document.getElementById('searchProgress'));
       } catch (e) { /* ignore — next tick retries */ }
     }, 500);
 
@@ -550,15 +726,24 @@
       }
 
       const includeTerms = q.split(',').flatMap(s => s.split(/\s+or\s+/i)).map(s => s.trim().toLowerCase()).filter(Boolean);
+      lastSearch = { q, exclude, includeTerms };
+      resultsById.clear();
+      for (const r of data.results) {
+        r.selected = false;
+        resultsById.set(r.id, r);
+      }
       grid.innerHTML = renderResults(data.results, includeTerms);
+      showDeepControls(data.results.length > 0);
 
+      const fullCount = data.results.filter(r => !r.partial).length;
       const bits = [
-        `${data.results.length} match${data.results.length === 1 ? '' : 'es'}`,
+        `${fullCount} match${fullCount === 1 ? '' : 'es'}`,
         `${data.scanned} candidate${data.scanned === 1 ? '' : 's'} scanned`,
-        `${data.fetched} description${data.fetched === 1 ? '' : 's'} checked`,
         `${data.elapsed_seconds}s`,
         `${data.requests_sent} request${data.requests_sent === 1 ? '' : 's'} sent to Vinted${data.failed_requests ? ` (${data.failed_requests} failed)` : ''}`,
       ];
+      if (data.partial_count) bits.splice(1, 0, `${data.partial_count} partial`);
+      if (data.results.length) bits.push('title/brand only — Run Deep Search to check descriptions');
       if (data.truncated) bits.push('stopped early — raise "Max results" or narrow keywords');
       if (data.blocked) bits.push('⚠️ Vinted temporarily blocked this session — try again later');
       stats.textContent = bits.join(' · ');
@@ -571,8 +756,99 @@
       clearInterval(progressTimer);
       btn.disabled = false;
       btn.innerHTML = '<i class="bi bi-search"></i> Run search';
+      setBusy(false);
     }
   }
+
+  async function runDeepSearch() {
+    if (!lastSearch) return;
+    const items = selectedResults().map(r => ({
+      id: r.id, url: r.url, title: r.title, brand: r.brand, seller_id: r.seller_id,
+    }));
+    if (!items.length) return;
+
+    const stats = document.getElementById('searchStats');
+    setBusy(true);
+    stats.textContent = 'Deep Search starting…';
+
+    // The grid stays as-is while this runs — only the stats line shows
+    // progress, so the user keeps their bearings on the results.
+    const progressTimer = setInterval(async () => {
+      try {
+        const r = await fetch('/api/search/progress', { cache: 'no-store' });
+        renderProgress(await r.json(), stats);
+      } catch (e) { /* ignore — next tick retries */ }
+    }, 500);
+
+    try {
+      const res = await fetch('/api/deep-search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ q: lastSearch.q, exclude: lastSearch.exclude, items }),
+      });
+      const data = await res.json();
+
+      if (!data.ok) {
+        stats.textContent = data.error || 'Deep Search failed.';
+        return;
+      }
+
+      let verified = 0, excluded = 0, unverified = 0, unmatched = 0;
+      for (const row of data.items) {
+        const r = resultsById.get(row.id);
+        if (!r) continue;
+        r.description = row.description || r.description || '';
+        if (row.country) r.country = row.country;
+        r.excluded_by = row.excluded_by;
+        r.verdict = row.verdict;
+        // A partial that the description confirmed is a normal verified card
+        // now — drop the partial flag so it renders (and would section) as full.
+        if (row.verdict === 'match') r.partial = false;
+        // Matched/excluded items are done with — clear them. Unverified ones
+        // stay ticked so a retry is one click away.
+        r.selected = row.verdict === 'unverified';
+        if (row.verdict === 'match') verified++;
+        else if (row.verdict === 'excluded') excluded++;
+        else if (row.verdict === 'unverified') unverified++;
+        else unmatched++;
+        updateCard(row.id);
+      }
+      syncSelectionUI();
+
+      const bits = ['Deep Search done'];
+      if (verified) bits.push(`${verified} verified`);
+      if (excluded) bits.push(`${excluded} excluded`);
+      if (unverified) bits.push(`${unverified} couldn't be fetched`);
+      if (unmatched) bits.push(`${unmatched} didn't match on description`);
+      bits.push(`${data.elapsed_seconds}s`);
+      bits.push(`${data.requests_sent} request${data.requests_sent === 1 ? '' : 's'} sent to Vinted${data.failed_requests ? ` (${data.failed_requests} failed)` : ''}`);
+      stats.textContent = bits.join(' · ');
+    } catch (e) {
+      stats.textContent = 'Deep Search request failed. Is the server running?';
+    } finally {
+      clearInterval(progressTimer);
+      setBusy(false);
+    }
+  }
+
+  document.getElementById('resultsGrid').addEventListener('change', (e) => {
+    const box = e.target.closest('.pick');
+    if (!box) return;
+    const r = resultsById.get(Number(box.dataset.id));
+    if (r) r.selected = box.checked;
+    syncSelectionUI();
+  });
+  document.getElementById('selectAllBtn').addEventListener('click', () => {
+    for (const r of resultsById.values()) r.selected = true;
+    document.querySelectorAll('#resultsGrid .pick').forEach(b => { b.checked = true; });
+    syncSelectionUI();
+  });
+  document.getElementById('clearSelBtn').addEventListener('click', () => {
+    for (const r of resultsById.values()) r.selected = false;
+    document.querySelectorAll('#resultsGrid .pick').forEach(b => { b.checked = false; });
+    syncSelectionUI();
+  });
+  document.getElementById('deepBtn').addEventListener('click', runDeepSearch);
 
   document.getElementById('searchBtn').addEventListener('click', runSearch);
   document.querySelectorAll('#searchForm input:not(#category_search)').forEach(el => {

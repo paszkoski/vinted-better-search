@@ -5,9 +5,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 Vinted Better Search — a Flask app that wraps Vinted's search API with strict, literal
-keyword matching against title *and* description. Vinted's own search is fuzzy and
-frequently ignores the words a user types (and its `svc-catalogue/items` API doesn't return
-descriptions at all), so this app re-verifies every candidate itself.
+keyword matching. Vinted's own search is fuzzy and frequently ignores the words a user
+types (and its `svc-catalogue/items` API doesn't return descriptions at all), so this app
+re-verifies every candidate itself. It does so in two stages: a fast **quick search** that
+matches only the listing fields already in the search response (title + brand, zero
+per-item requests), then an opt-in **Deep Search** that fetches the item page
+(description) and seller country for just the items the user selected and re-checks them.
+Quick search can optionally also list **partial matches** — items whose title/brand
+satisfied only some keyword groups, which Deep Search then settles against the description.
 
 ## Running
 
@@ -66,38 +71,66 @@ Five modules, each with one job:
 
 - **[matcher.py](matcher.py)** — pure string-matching logic, no I/O. Keywords are
   comma-separated AND-groups; within a group, `OR`-separated alternatives (e.g.
-  `keychron OR key chron, k3` = `(keychron OR key chron) AND k3`). `title_satisfies()`
-  checks title alone and returns `True`/`False`/`None` (`None` = inconclusive, needs the
-  description). `full_satisfies()` checks title+description together. This
-  title-first/description-second split is what lets [app.py](app.py) skip a description
-  fetch whenever the title alone settles the match.
+  `keychron OR key chron, k3` = `(keychron OR key chron) AND k3`). `listing_satisfies()`
+  is the strict, listing-only match that powers quick search: `True` only if every include
+  group is present in the title+brand text and no exclude term is, with no inconclusive
+  third answer. `full_satisfies()` checks title+description together and powers Deep
+  Search. `first_exclude_hit()` reports *which* exclude term rejected an item, so a card
+  can say "Excluded: <term>" instead of just dimming. `missing_groups()` returns the
+  include groups with no alternative in a text — quick search uses it to tell a *partial*
+  candidate (some groups matched) from Vinted's fuzzy noise (none did), and to report
+  which keywords a partial result is missing. (`title_satisfies()` remains for the legacy
+  title-first/description-second split.)
 
 - **[categories.py](categories.py)** — fetches Vinted's category tree (id/title/path) for
   the category picker. No documented `/catalogs` endpoint exists, so this scrapes the
   homepage HTML for a Next.js RSC streaming chunk containing `catalogTree` JSON and
   flattens it. Cached in-memory for 24h.
 
-- **[app.py](app.py)** — Flask routes + orchestration. `run_search()` is the core loop:
-  page through Vinted search results, resolve what title alone can settle, batch-fetch
-  descriptions for the rest concurrently, then resolve seller country only for items that
-  made the final cut (not every scanned candidate). A single shared `VintedScraper` keeps
-  session cookies warm across requests; `_search_lock` serializes searches so concurrent
-  requests can't interleave on that shared session or double Vinted's view of this
-  instance's request rate. Also serves `/api/version` and `/api/update`, which `git pull`
-  the repo in place and exit the process (the Docker restart policy brings it back up on
-  the new code) — this is how the frontend's self-update button works; both require
-  `GITHUB_TOKEN` since the repo is private.
+- **[app.py](app.py)** — Flask routes + orchestration, two stages. `run_search()` (stage 1)
+  pages through Vinted search results and matches each candidate on listing fields only
+  (`listing_satisfies` over title+brand) — it never fetches an item page or a seller
+  profile, so `requests_sent` is just the number of search pages. It keeps each result's
+  `seller_id` (previously popped) because Deep Search needs it. With `show_partial` (the
+  `partial=1` query arg), it also collects candidates matching only some include groups as
+  `partial` results carrying the groups they're `missing` — but never when no group matched
+  at all. Partials are listed after full matches and are capped separately from
+  `max_results` (they don't count toward it); the response reports `partial_count`.
+  `run_deep_search()`
+  (stage 2, `POST /api/deep-search`) takes the selected items plus the keywords of the
+  search that produced them, batch-fetches descriptions (`get_item_descriptions`) and
+  seller countries (`get_user_countries`) for just those items, and returns a per-item
+  verdict — `match` / `excluded` (with the offending term) / `unverified` (fetch failed,
+  retryable) / `no_match`. A single shared `VintedScraper` keeps session cookies warm
+  across requests; `_search_lock` serializes searches so concurrent requests can't
+  interleave on that shared session or double Vinted's view of this instance's request
+  rate. Both flows share `/api/search/progress`. Also serves `/api/version` and
+  `/api/update`, which `git pull` the repo in place and exit the process (the Docker
+  restart policy brings it back up on the new code) — this is how the frontend's
+  self-update button works; both require `GITHUB_TOKEN` since the repo is private.
 
 - **[templates/index.html](templates/index.html)** — single-page frontend, vanilla JS, no
-  build step. Client-side keyword splitting here (for highlighting matched terms in
-  results) must stay in sync with `matcher.py`'s AND/OR parsing.
+  build step. Each result card has a checkbox; "Run Deep Search" POSTs the checked items to
+  `/api/deep-search` and updates those cards in place with verdicts (matched items get the
+  "Verified" stamp + description snippet, excluded ones dim with a reason badge, failed
+  ones stay checked for retry). A "Show partial matches" toggle (`partial=1`) renders full
+  matches first and then, under a "Partial matches" divider, partial cards badged
+  "Partial — missing: <groups>"; a partial Deep-Searched to `match` becomes a normal
+  verified card, and a `no_match` one dims and untick like an excluded card. Client-side
+  keyword splitting here (for highlighting matched terms in results) must stay in sync with
+  `matcher.py`'s AND/OR parsing.
 
 ### Request flow
 
-Browser → `/api/search` → `run_search()` → `scraper.search()` (candidate pool from
-Vinted, sorted/paginated) → `matcher.title_satisfies()` per candidate → for inconclusive
-ones, `scraper.get_item_descriptions()` (concurrent) → `matcher.full_satisfies()` →
-`scraper.get_user_countries()` for final results only → JSON response.
+Browser → `/api/search` → `run_search()` → `scraper.search()` (candidate pool from Vinted,
+sorted/paginated) → `matcher.listing_satisfies()` per candidate (title + brand only), plus
+`matcher.missing_groups()` for partials when `partial=1` → JSON response. No per-item
+requests.
+
+Then, for the items the user checks: Browser → `/api/deep-search` →
+`run_deep_search()` → `scraper.get_item_descriptions()` (concurrent) →
+`matcher.full_satisfies()` / `first_exclude_hit()` per item → `scraper.get_user_countries()`
+for those items' sellers → per-item verdicts → JSON response → cards updated in place.
 
 ### Key constraint
 
