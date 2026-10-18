@@ -12,6 +12,12 @@ DEFAULT_CURRENCY = "PLN"
 DEFAULT_ORDER = "price_low_to_high"
 CATALOG_PER_PAGE = 96  # Vinted's server-side max for catalog/items
 
+# Quick search scans every page Vinted reports (it costs no per-item requests),
+# but a very broad query can report thousands of pages. This ceiling stops one
+# search firing dozens of back-to-back catalog requests (a Vinted blocking
+# risk) — 30 pages × CATALOG_PER_PAGE ≈ 2,880 candidates scanned.
+MAX_SEARCH_PAGES = int(os.environ.get("MAX_SEARCH_PAGES", 30))
+
 BLOCK_WAIT_SECONDS = int(os.environ.get("BLOCK_WAIT_SECONDS", 1800))  # 30 min default — fallback cooldown
                                                                         # only used when a VPN rotation attempt
                                                                         # itself fails (see vpn.py)
@@ -59,14 +65,6 @@ DETAIL_BATCH_COOLDOWN_SECONDS = float(os.environ.get("DETAIL_BATCH_COOLDOWN_SECO
 DETAIL_MAX_ROUNDS = int(os.environ.get("DETAIL_MAX_ROUNDS", 5))
 
 SESSION_REFRESH_INTERVAL = 50  # refresh session every N API calls
-
-# ── Deep-search bounds ───────────────────────────────────────────────────────
-# A title-only match needs no extra request. Anything else needs a per-item
-# description fetch, which is what makes this slower (but correct) than
-# Vinted's own search. These are just defaults when the caller doesn't
-# specify max_results/max_scan — no upper cap is enforced beyond that.
-DEFAULT_MAX_RESULTS = 40
-DEFAULT_MAX_SCAN = 200
 
 # Deep Search fetches a real Vinted item page per selected item, so it's the
 # only flow that risks a burst of per-item requests. This caps how many items

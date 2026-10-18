@@ -111,7 +111,7 @@
     }
     .ticket-grid {
       display: grid; gap: 1.1rem;
-      grid-template-columns: 2fr 1fr 1fr 1fr 1fr;
+      grid-template-columns: 2fr 1fr 1fr 1fr;
     }
     @media (max-width: 900px) {
       .ticket-grid { grid-template-columns: 1fr 1fr; }
@@ -381,10 +381,6 @@
             <option value="relevance">Relevance</option>
           </select>
         </div>
-        <div class="field">
-          <label for="max_results">Max results</label>
-          <input type="number" min="1" id="max_results" value="40">
-        </div>
       </div>
 
       <div class="ticket-row">
@@ -549,6 +545,7 @@
   // in place from these objects instead of being rebuilt from a new response.
   let lastSearch = null;          // {q, exclude, includeTerms} that produced the current grid
   const resultsById = new Map();  // id -> result object (mutable)
+  let deepSearchMaxItems = 0;     // server cap, from the last /api/search response
   let busy = false;
 
   function setBusy(on) {
@@ -562,18 +559,40 @@
     return Array.from(resultsById.values()).filter(r => r.selected);
   }
 
+  // A card still needs a Deep Search if it has no verdict yet, or its last
+  // attempt couldn't be fetched. Used by "Select all" and by the limit hint.
+  function isUnverified(r) {
+    return !r.verdict || r.verdict === 'unverified';
+  }
+
   function syncSelectionUI() {
     const btn = document.getElementById('deepBtn');
     const n = selectedResults().length;
-    btn.disabled = busy || n === 0;
-    btn.innerHTML = `<i class="bi bi-search-heart"></i> Run Deep Search (${n})`;
+    const over = deepSearchMaxItems > 0 && n > deepSearchMaxItems;
+    btn.disabled = busy || n === 0 || over;
+    btn.innerHTML = over
+      ? `<i class="bi bi-search-heart"></i> Run Deep Search (max ${deepSearchMaxItems})`
+      : `<i class="bi bi-search-heart"></i> Run Deep Search (${n})`;
+  }
+
+  function syncDeepHint() {
+    document.getElementById('deepHint').textContent = deepSearchMaxItems
+      ? `Deep Search opens each selected item on Vinted — up to ${deepSearchMaxItems} at a time, so select only what you need. "Select all" ticks the first ${deepSearchMaxItems} not-yet-verified results.`
+      : 'Deep Search opens each selected item on Vinted — select only what you need.';
+  }
+
+  function syncCheckboxes() {
+    document.querySelectorAll('#resultsGrid .pick').forEach(box => {
+      const r = resultsById.get(Number(box.dataset.id));
+      box.checked = Boolean(r && r.selected);
+    });
   }
 
   function showDeepControls(show) {
     for (const id of ['selectAllBtn', 'clearSelBtn', 'deepBtn', 'deepHint']) {
       document.getElementById(id).style.display = show ? '' : 'none';
     }
-    if (show) syncSelectionUI();
+    if (show) { syncDeepHint(); syncSelectionUI(); }
   }
 
   function updateCard(id) {
@@ -662,7 +681,7 @@
   function renderProgress(p, el) {
     if (!el || !p || !p.active) return;
     const bits = [PHASE_LABELS[p.phase] || 'Working…'];
-    if (p.page) bits.push(`page ${p.page}`);
+    if (p.page) bits.push(p.total_pages ? `page ${p.page} of ${p.total_pages}` : `page ${p.page}`);
     if (p.scanned) bits.push(`${p.scanned} scanned`);
     if (p.found) bits.push(`${p.found} matched`);
     if (p.checked) bits.push(`${p.checked} checked`);
@@ -687,7 +706,6 @@
       price_from: document.getElementById('price_from').value.trim(),
       price_to: document.getElementById('price_to').value.trim(),
       order: document.getElementById('order').value,
-      max_results: document.getElementById('max_results').value.trim() || '40',
     });
 
     const btn = document.getElementById('searchBtn');
@@ -727,6 +745,7 @@
 
       const includeTerms = q.split(',').flatMap(s => s.split(/\s+or\s+/i)).map(s => s.trim().toLowerCase()).filter(Boolean);
       lastSearch = { q, exclude, includeTerms };
+      deepSearchMaxItems = Number(data.deep_search_max_items) || 0;
       resultsById.clear();
       for (const r of data.results) {
         r.selected = false;
@@ -739,12 +758,13 @@
       const bits = [
         `${fullCount} match${fullCount === 1 ? '' : 'es'}`,
         `${data.scanned} candidate${data.scanned === 1 ? '' : 's'} scanned`,
+        `${data.pages} page${data.pages === 1 ? '' : 's'}`,
         `${data.elapsed_seconds}s`,
         `${data.requests_sent} request${data.requests_sent === 1 ? '' : 's'} sent to Vinted${data.failed_requests ? ` (${data.failed_requests} failed)` : ''}`,
       ];
       if (data.partial_count) bits.splice(1, 0, `${data.partial_count} partial`);
       if (data.results.length) bits.push('title/brand only — Run Deep Search to check descriptions');
-      if (data.truncated) bits.push('stopped early — raise "Max results" or narrow keywords');
+      if (data.hit_page_limit) bits.push(`stopped at ${data.pages} pages — narrow keywords/category/price to see the rest`);
       if (data.blocked) bits.push('⚠️ Vinted temporarily blocked this session — try again later');
       stats.textContent = bits.join(' · ');
     } catch (e) {
@@ -839,13 +859,21 @@
     syncSelectionUI();
   });
   document.getElementById('selectAllBtn').addEventListener('click', () => {
-    for (const r of resultsById.values()) r.selected = true;
-    document.querySelectorAll('#resultsGrid .pick').forEach(b => { b.checked = true; });
+    // Tick only what Deep Search can take in one go: the first N results that
+    // are still unverified (no verdict yet, or a fetch that failed). Already
+    // matched/excluded cards are left alone.
+    const limit = deepSearchMaxItems > 0 ? deepSearchMaxItems : Infinity;
+    let picked = 0;
+    for (const r of resultsById.values()) {
+      r.selected = false;
+      if (picked < limit && isUnverified(r)) { r.selected = true; picked++; }
+    }
+    syncCheckboxes();
     syncSelectionUI();
   });
   document.getElementById('clearSelBtn').addEventListener('click', () => {
     for (const r of resultsById.values()) r.selected = false;
-    document.querySelectorAll('#resultsGrid .pick').forEach(b => { b.checked = false; });
+    syncCheckboxes();
     syncSelectionUI();
   });
   document.getElementById('deepBtn').addEventListener('click', runDeepSearch);

@@ -88,14 +88,17 @@ Five modules, each with one job:
   flattens it. Cached in-memory for 24h.
 
 - **[app.py](app.py)** — Flask routes + orchestration, two stages. `run_search()` (stage 1)
-  pages through Vinted search results and matches each candidate on listing fields only
-  (`listing_satisfies` over title+brand) — it never fetches an item page or a seller
-  profile, so `requests_sent` is just the number of search pages. It keeps each result's
-  `seller_id` (previously popped) because Deep Search needs it. With `show_partial` (the
-  `partial=1` query arg), it also collects candidates matching only some include groups as
-  `partial` results carrying the groups they're `missing` — but never when no group matched
-  at all. Partials are listed after full matches and are capped separately from
-  `max_results` (they don't count toward it); the response reports `partial_count`.
+  pages through *all* of Vinted's search results (until its `pagination.total_pages` is
+  reached, an empty page ends the run, or the `MAX_SEARCH_PAGES` safety ceiling trips, which
+  the response reports as `hit_page_limit` + `pages`) and matches each candidate on listing
+  fields only (`listing_satisfies` over title+brand) — it never fetches an item page or a
+  seller profile, so `requests_sent` is just the number of search pages. It keeps each
+  result's `seller_id` (previously popped) because Deep Search needs it. With `show_partial`
+  (the `partial=1` query arg), it also collects candidates matching only some include groups
+  as `partial` results carrying the groups they're `missing` — but never when no group
+  matched at all. Full matches are listed first, then partials (no cap — both are bounded by
+  pages scanned); the response reports `partial_count` and the `deep_search_max_items` cap
+  so the frontend can stop over-selection before the server would 400.
   `run_deep_search()`
   (stage 2, `POST /api/deep-search`) takes the selected items plus the keywords of the
   search that produced them, batch-fetches descriptions (`get_item_descriptions`) and
@@ -116,14 +119,17 @@ Five modules, each with one job:
   ones stay checked for retry). A "Show partial matches" toggle (`partial=1`) renders full
   matches first and then, under a "Partial matches" divider, partial cards badged
   "Partial — missing: <groups>"; a partial Deep-Searched to `match` becomes a normal
-  verified card, and a `no_match` one dims and untick like an excluded card. Client-side
+  verified card, and a `no_match` one dims and untick like an excluded card. Because a
+  broad query can now return more results than one Deep Search may fetch, the button
+  disables (showing "(max N)") once the selection exceeds `deep_search_max_items`, and
+  "Select all" ticks only the first N not-yet-verified results. Client-side
   keyword splitting here (for highlighting matched terms in results) must stay in sync with
   `matcher.py`'s AND/OR parsing.
 
 ### Request flow
 
 Browser → `/api/search` → `run_search()` → `scraper.search()` (candidate pool from Vinted,
-sorted/paginated) → `matcher.listing_satisfies()` per candidate (title + brand only), plus
+page 1..N) → `matcher.listing_satisfies()` per candidate (title + brand only), plus
 `matcher.missing_groups()` for partials when `partial=1` → JSON response. No per-item
 requests.
 

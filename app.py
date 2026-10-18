@@ -22,9 +22,8 @@ from matcher import (
 from categories import get_categories
 from config import (
     DEFAULT_ORDER,
-    DEFAULT_MAX_RESULTS,
-    DEFAULT_MAX_SCAN,
     CATALOG_PER_PAGE,
+    MAX_SEARCH_PAGES,
     VINTED_BASE_URL,
     DEEP_SEARCH_MAX_ITEMS,
 )
@@ -143,8 +142,6 @@ def run_search(
     price_from: float | None,
     price_to: float | None,
     order: str,
-    max_results: int,
-    max_scan: int,
     show_partial: bool,
 ) -> dict:
     """
@@ -154,11 +151,15 @@ def run_search(
     listing doesn't settle the match are simply not results; the description
     hunt is what Deep Search (below) does, and only for selected items.
 
+    Pages through everything Vinted reports (stopping on an empty page or
+    once `pagination.total_pages` is reached), with a `MAX_SEARCH_PAGES`
+    safety ceiling so a very broad query can't fire dozens of back-to-back
+    catalog requests.
+
     With `show_partial`, candidates matching only *some* include groups are
     also returned (flagged `partial` + the groups they're `missing`), so the
     user can Deep Search them to check the description — but only when at
     least one group did match, so Vinted's fuzzy pool doesn't flood the grid.
-    Partials never count toward `max_results`; they're capped separately.
     """
     scraper = get_scraper()
     started = time.time()
@@ -179,15 +180,20 @@ def run_search(
     partials = []
     scanned = 0
     page = 1
+    pages = 0          # pages actually fetched
+    total_pages = 0    # Vinted's reported page count, known after page 1
     search_session_id = None
     blocked = False
+    hit_page_limit = False
 
-    _set_progress(active=True, phase="searching", page=0, scanned=0, found=0,
-                   to_fetch=0, requests_sent=0, retries=0, failed=0)
+    _set_progress(active=True, phase="searching", page=0, pages=0, total_pages=0,
+                   scanned=0, found=0, to_fetch=0, requests_sent=0, retries=0, failed=0)
 
     try:
-        while len(results) < max_results and scanned < max_scan:
-            _report(phase="searching", page=page)
+        # The `else` runs only if the ceiling stopped us — i.e. Vinted still
+        # had pages left but we deliberately didn't fetch them.
+        while page <= MAX_SEARCH_PAGES:
+            _report(phase="searching", page=page, total_pages=total_pages)
             data = scraper.search(
                 search_text,
                 page=page,
@@ -198,6 +204,7 @@ def run_search(
                 per_page=CATALOG_PER_PAGE,
                 search_session_id=search_session_id,
             )
+            pages += 1
             search_session_id = (
                 (data.get("search_tracking_params") or {}).get("search_session_id")
                 or search_session_id
@@ -208,9 +215,10 @@ def run_search(
                     blocked = True
                 break
 
+            pagination = data.get("pagination", {})
+            total_pages = pagination.get("total_pages", 1) or total_pages
+
             for item in items:
-                if scanned >= max_scan or len(results) >= max_results:
-                    break
                 scanned += 1
 
                 # Listing fields only — "brand_title" rides along in the same
@@ -223,26 +231,26 @@ def run_search(
                     continue
 
                 # Not a full match. An exclude term rejects outright; otherwise
-                # include groups are missing, which is a partial only when it
-                # was asked for, at least one group did match, and there's room
-                # under the separate partial cap. Full matches stop the scan
-                # (above), so partials can never crowd out max_results.
+                # include groups are missing — a partial only when it was asked
+                # for and at least one group did match (a candidate matching no
+                # group at all is just Vinted's fuzzy pool leaking through).
                 if first_exclude_hit(listing_text, exclude_terms):
                     continue
                 missing = missing_groups(listing_text, include_groups)
-                if show_partial and len(missing) < len(include_groups) and len(partials) < max_results:
+                if show_partial and len(missing) < len(include_groups):
                     partial = build_result(item, description=None)
                     partial["partial"] = True
                     partial["missing"] = [" OR ".join(group) for group in missing]
                     partials.append(partial)
 
-            _report(phase="searching", scanned=scanned, found=len(results))
+            _report(phase="searching", page=page, total_pages=total_pages,
+                    scanned=scanned, found=len(results))
 
-            pagination = data.get("pagination", {})
-            total_pages = pagination.get("total_pages", 1)
             if page >= total_pages:
                 break
             page += 1
+        else:
+            hit_page_limit = True
     finally:
         _report(active=False, phase="done", to_fetch=0)
 
@@ -252,7 +260,8 @@ def run_search(
         "results": results + partials,
         "partial_count": len(partials),
         "scanned": scanned,
-        "truncated": scanned >= max_scan and len(results) < max_results,
+        "pages": pages,
+        "hit_page_limit": hit_page_limit,
         "blocked": blocked,
         "elapsed_seconds": round(time.time() - started, 1),
         "requests_sent": scraper.request_count - requests_before,
@@ -399,18 +408,6 @@ def api_search():
     if order not in VALID_ORDERS:
         order = DEFAULT_ORDER
 
-    def parse_int(name, default):
-        raw = request.args.get(name, "").strip()
-        try:
-            val = int(raw) if raw else default
-        except ValueError:
-            val = default
-        return max(1, val)
-
-    max_results = parse_int("max_results", DEFAULT_MAX_RESULTS)
-    max_scan = parse_int("max_scan", DEFAULT_MAX_SCAN)
-    max_scan = max(max_scan, max_results)
-
     # Send Vinted our include keywords as the search text too — it's a much
     # better candidate pool (roughly on-topic, sorted how we asked) than
     # scanning the whole catalog ourselves. We still verify every candidate
@@ -434,14 +431,14 @@ def api_search():
             price_from=price_from,
             price_to=price_to,
             order=order,
-            max_results=max_results,
-            max_scan=max_scan,
             show_partial=show_partial,
         )
     finally:
         _search_lock.release()
 
-    return jsonify({"ok": True, **outcome})
+    # The frontend needs the Deep Search cap up front so it can stop the user
+    # from selecting more than the server will accept.
+    return jsonify({"ok": True, "deep_search_max_items": DEEP_SEARCH_MAX_ITEMS, **outcome})
 
 
 @app.route("/api/deep-search", methods=["POST"])

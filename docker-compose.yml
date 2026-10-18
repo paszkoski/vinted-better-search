@@ -42,6 +42,8 @@ services:
       - DETAIL_BATCH_SIZE      # requests per batch before pausing (optional, default 29)
       - DETAIL_BATCH_COOLDOWN_SECONDS # pause between batches (optional, default 10)
       - DETAIL_MAX_ROUNDS      # retry rounds for deferred/blocked items before giving up (optional, default 5)
+      - MAX_SEARCH_PAGES       # safety ceiling on catalog pages scanned per search (optional, default 30)
+      - DEEP_SEARCH_MAX_ITEMS  # max items per Deep Search request (optional, default 60)
       - NORDVPN_TOKEN          # NordVPN login token (required — see .env.example for how to generate one)
       - NORDVPN_COUNTRIES      # comma-separated countries to rotate between (optional, defaults to Poland,Germany,Netherlands,Czech Republic)
       - VPN_ROTATE_COOLDOWN_SECONDS  # minimum seconds between two VPN rotations (optional, default 15)
